@@ -8,8 +8,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "jfarr.power"
-  ipcTarget: "jfarr.power"
+  moduleName: "nertwork.power"
+  ipcTarget: "nertwork.power"
   // manageIpc: false so this panel can own the single IpcHandler the target
   // permits — needed for the togglePercentage method below.
   manageIpc: false
@@ -221,7 +221,7 @@ Panel {
   }
 
   IpcHandler {
-    target: "jfarr.power"
+    target: "nertwork.power"
 
     function open() { root.open() }
     function close() { root.close() }

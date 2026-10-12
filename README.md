@@ -48,13 +48,13 @@ omarchy plugin add git@github.com:nertwork/omarchy-battery-health.git --enable
 To update to the latest version:
 
 ```bash
-omarchy plugin update jfarr.power
+omarchy plugin update nertwork.power
 ```
 
 To remove the plugin:
 
 ```bash
-omarchy plugin remove jfarr.power
+omarchy plugin remove nertwork.power
 ```
 
 ---
