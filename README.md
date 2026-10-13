@@ -42,7 +42,7 @@ A polished, native Omarchy status bar panel and widget providing advanced batter
 Install directly into Omarchy using the `omarchy plugin` CLI:
 
 ```bash
-omarchy plugin add git@github.com:nertwork/omarchy-battery-health.git --enable
+omarchy plugin add https://github.com/nertwork/omarchy-battery-health.git --enable
 ```
 
 To update to the latest version:

@@ -34,14 +34,10 @@ if [[ "$limit" == "status" ]]; then
   exit 0
 fi
 
-case "$limit" in
-  80|100) ;;
-  [0-9]|[1-9][0-9]|100) ;;
-  *)
-    echo "Usage: set-charge-limit.sh [80|100|<percent>]" >&2
-    exit 2
-    ;;
-esac
+if ! [[ "$limit" =~ ^[0-9]+$ ]] || (( limit < 50 || limit > 100 )); then
+  echo "Usage: set-charge-limit.sh [80|100|<percent 50-100>]" >&2
+  exit 2
+fi
 
 if command -v omarchy-battery-charge-limit >/dev/null 2>&1 && [[ "$battery_node" == *macsmc-battery* ]]; then
   exec omarchy-battery-charge-limit "$limit"
@@ -51,7 +47,7 @@ if (( EUID == 0 )); then
   printf '%s\n' "$limit" | /usr/bin/tee "$end_file" >/dev/null
 else
   printf '%s\n' "$limit" | sudo -n /usr/bin/tee "$end_file" >/dev/null 2>&1 || \
-  pkexec sh -c "echo '$limit' > '$end_file'"
+  printf '%s\n' "$limit" | pkexec /usr/bin/tee "$end_file" >/dev/null
 fi
 
 actual_end=$(<"$end_file")
