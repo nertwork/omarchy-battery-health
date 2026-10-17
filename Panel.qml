@@ -66,8 +66,8 @@ Panel {
     var parts = []
     if (root.showPercentage) parts.push(pct)
     if (root.showWatts && watts) parts.push(watts)
-    parts.push(root.batteryIcon())
-    return parts.join(" ")
+    if (parts.length === 0) return root.batteryIcon()
+    return parts.join(" · ") + "  " + root.batteryIcon()
   }
   // With percentage/wattage shown the button paints a text block wider than an
   // icon, so the open-panel mark takes the painted width instead of the
@@ -396,7 +396,7 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     text: root.barText
-    slotSize: Style.bar.iconSlot * (!vertical ? (root.showPercentage && root.showWatts ? 3.1 : (root.showPercentage || root.showWatts ? 2.1 : 1)) : 1)
+    slotSize: !vertical && root.hasBarText ? Math.max(Style.bar.iconSlot, Math.ceil(button.glyphPaintedWidth + Style.space(14))) : Style.bar.iconSlot
     tooltipText: {
       var load = root.batteryInfo.system_power ? "Load: " + root.batteryInfo.system_power + " · " : ""
       return load + (root.hasChargeLimit ? "Left: Open · Middle: Limit (" + root.currentChargeLimit + "%) · Right: Bar Mode" : "Left: Open · Right: Bar Mode")
@@ -416,7 +416,7 @@ Panel {
     bar: root.bar
     open: root.opened && root.batteryPresent
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(380))
+    contentWidth: panel.fittedContentWidth(Style.space(430))
     contentHeight: panel.fittedContentHeight(column.implicitHeight)
 
     PanelKeyCatcher {
@@ -548,11 +548,11 @@ Panel {
         Row {
           visible: root.batteryInfo.percentage !== undefined
           width: parent.width
-          spacing: Style.space(20)
+          spacing: Style.space(24)
 
           Column {
             width: (parent.width - parent.spacing) / 2
-            spacing: Style.spacing.labelGap
+            spacing: Style.space(8)
             InfoPair { label: "System load"; value: root.batteryInfo.system_power || "—" }
             InfoPair { label: "AC input"; value: root.batteryInfo.ac_power || (root.discharging ? "Offline" : "—") }
             InfoPair {
@@ -566,7 +566,7 @@ Panel {
 
           Column {
             width: (parent.width - parent.spacing) / 2
-            spacing: Style.spacing.labelGap
+            spacing: Style.space(8)
             InfoPair { label: "Battery flow"; value: root.batteryInfo.battery_flow || (root.chargeThresholdActive ? "Holding" : (root.batteryInfo.rate || "—")) }
             InfoPair {
               label: (!root.discharging && root.batteryInfo.ac_vi) ? "Charger V / I" : (root.discharging ? "Time left" : "Time to full")
@@ -719,16 +719,31 @@ Panel {
     }
   }
 
-  component InfoPair: Row {
+  component InfoPair: Item {
     property string label: ""
     property string value: ""
 
     width: parent.width
-    spacing: Style.space(8)
+    implicitHeight: Math.max(pairLabel.implicitHeight, pairValue.implicitHeight)
+    height: implicitHeight
 
-    InfoLabel { text: label }
-    Item { width: Math.max(0, parent.width - parent.children[0].implicitWidth - parent.children[2].implicitWidth - parent.spacing * 2); height: 1 }
-    InfoValue { text: value }
+    InfoLabel {
+      id: pairLabel
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      text: parent.label
+    }
+
+    InfoValue {
+      id: pairValue
+      anchors.right: parent.right
+      anchors.left: pairLabel.right
+      anchors.leftMargin: Style.space(10)
+      anchors.verticalCenter: parent.verticalCenter
+      horizontalAlignment: Text.AlignRight
+      elide: Text.ElideRight
+      text: parent.value
+    }
   }
 
   component InfoLabel: Text {

@@ -157,9 +157,9 @@ BEGIN {
   } else if (state == "fully-charged" || state == "full") {
     battery_flow = "Full (0W)"
   } else if (state == "charging") {
-    battery_flow = sprintf("+%.1fW (Charging)", bat_w)
+    battery_flow = sprintf("+%.1fW (Chg)", bat_w)
   } else if (state == "discharging") {
-    battery_flow = sprintf("-%.1fW (Discharging)", bat_w)
+    battery_flow = sprintf("-%.1fW (Drain)", bat_w)
   } else {
     battery_flow = (rate != "" ? rate : "0W")
   }
@@ -194,7 +194,7 @@ BEGIN {
     ef_wh = (bat_energy_full + 0) / 1000000.0
     ed_wh = (bat_energy_design + 0) / 1000000.0
     hpct = (ef_wh / ed_wh) * 100.0
-    health = sprintf("%.0f%% (%.0f / %.0fWh)", hpct, ef_wh, ed_wh)
+    health = sprintf("%.0f%% (%.0f/%.0fWh)", hpct, ef_wh, ed_wh)
     if (size == "") size = sprintf("%.0fWh", ef_wh)
     if (design_size == "") design_size = sprintf("%.0fWh", ed_wh)
   } else if (size != "" && design_size != "") {
@@ -208,7 +208,7 @@ BEGIN {
   if (bat_temp != "" && bat_volt != "") {
     tc = (bat_temp + 0) / 10.0
     vv = (bat_volt + 0) / 1000000.0
-    temp_volt = sprintf("%.1f°C · %.2fV", tc, vv)
+    temp_volt = sprintf("%.1f°C · %.1fV", tc, vv)
   } else if (bat_temp != "") {
     temp_volt = sprintf("%.1f°C", (bat_temp + 0) / 10.0)
   } else if (bat_volt != "") {
