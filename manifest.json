@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "nertwork.power",
   "name": "Battery Health & Power",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "nertwork",
   "license": "MIT",
-  "description": "Comprehensive battery health management, charge threshold limiting (80%/100%), power profile switching, and live system analytics in a native Omarchy bar panel.",
+  "description": "Comprehensive battery health management, live SMC/system wattage telemetry (even on AC), 80%/100% charge threshold limiting, and power profile switching in a native Omarchy bar panel.",
   "kinds": [
     "bar-widget"
   ],

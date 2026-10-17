@@ -20,8 +20,15 @@ Panel {
   property int profileIndex: 0
   property bool cursorActive: false
   readonly property bool showPercentage: setting("showPercentage", false) === true
+  readonly property bool showWatts: setting("showWatts", true) !== false
   property int currentChargeLimit: 80
   property bool hasChargeLimit: false
+
+  readonly property string telemetryScriptPath: {
+    var url = String(Qt.resolvedUrl("bin/power-telemetry.sh"))
+    if (url.indexOf("file://") === 0) url = url.substring(7)
+    return decodeURIComponent(url)
+  }
 
   FileView {
     id: chargeLimitFile
@@ -49,11 +56,23 @@ Panel {
 
   Component.onCompleted: {
     updateLimit()
+    if (!batteryProc.running) batteryProc.running = true
   }
-  // With the percentage shown the button paints a text block wider than an
+  readonly property bool hasBarText: (showPercentage || showWatts) && !button.vertical
+  readonly property string barText: {
+    if (button.vertical) return root.batteryIcon()
+    var pct = Math.round(root.batteryFraction * 100) + "%"
+    var watts = root.batteryInfo.system_power_short || root.batteryInfo.system_power || ""
+    var parts = []
+    if (root.showPercentage) parts.push(pct)
+    if (root.showWatts && watts) parts.push(watts)
+    parts.push(root.batteryIcon())
+    return parts.join(" ")
+  }
+  // With percentage/wattage shown the button paints a text block wider than an
   // icon, so the open-panel mark takes the painted width instead of the
   // icon-sized fraction of the slot the fallback assumes.
-  readonly property real openPanelIndicatorWidth: showPercentage && !button.vertical ? button.glyphPaintedWidth : 0
+  readonly property real openPanelIndicatorWidth: hasBarText ? button.glyphPaintedWidth : 0
   readonly property bool batteryPresent: {
     var device = UPower.displayDevice
     return !!(device && device.isPresent)
@@ -157,10 +176,11 @@ Panel {
   readonly property bool rotatingPhrases: activePhrases.length > 0
 
   readonly property string heroStatusText: {
-    if (fullyCharged) return "Fully charged"
-    if (chargeThresholdActive) return "Holding at " + (root.currentChargeLimit ? root.currentChargeLimit + "%" : "limit")
-    if (rotatingPhrases) return activePhrases[phraseIndex % activePhrases.length]
-    return modeLabel()
+    var loadSuffix = root.batteryInfo.system_power ? " · " + root.batteryInfo.system_power + " load" : ""
+    if (fullyCharged) return "Fully charged" + loadSuffix
+    if (chargeThresholdActive) return "Holding at " + (root.currentChargeLimit ? root.currentChargeLimit + "%" : "limit") + loadSuffix
+    if (rotatingPhrases) return activePhrases[phraseIndex % activePhrases.length] + (root.batteryInfo.system_power ? " · " + root.batteryInfo.system_power : "")
+    return modeLabel() + loadSuffix
   }
 
   function refresh() {
@@ -203,8 +223,20 @@ Panel {
   }
 
   function togglePercentage() {
-    root.settings = Object.assign({}, root.settings, { showPercentage: !root.showPercentage })
+    var nextPct = root.showPercentage
+    var nextWatts = root.showWatts
+    if (!root.showPercentage && root.showWatts) {
+      nextPct = true; nextWatts = true
+    } else if (root.showPercentage && root.showWatts) {
+      nextPct = true; nextWatts = false
+    } else if (root.showPercentage && !root.showWatts) {
+      nextPct = false; nextWatts = false
+    } else {
+      nextPct = false; nextWatts = true
+    }
+    root.settings = Object.assign({}, root.settings, { showPercentage: nextPct, showWatts: nextWatts })
     if (root.bar && root.bar.shell) root.bar.shell.updateEntryInline(root.moduleName, root.settings)
+    if (nextWatts && !batteryProc.running) batteryProc.running = true
   }
 
   IpcHandler {
@@ -217,7 +249,7 @@ Panel {
     function toggle() { root.toggle() }
     function togglePercentage() { root.togglePercentage() }
     function toggleChargeLimit() { root.toggleChargeLimit() }
-    function setChargeLimit(limit) { root.setChargeLimit(parseInt(limit)) }
+    function setChargeLimit(limit: string) { root.setChargeLimit(parseInt(limit)) }
   }
 
   IpcHandler {
@@ -230,7 +262,7 @@ Panel {
     function toggle() { root.toggle() }
     function togglePercentage() { root.togglePercentage() }
     function toggleChargeLimit() { root.toggleChargeLimit() }
-    function setChargeLimit(limit) { root.setChargeLimit(parseInt(limit)) }
+    function setChargeLimit(limit: string) { root.setChargeLimit(parseInt(limit)) }
   }
 
   onOpenedChanged: {
@@ -255,7 +287,7 @@ Panel {
 
   Process {
     id: batteryProc
-    command: ["omarchy-battery-status", "--shell"]
+    command: [root.telemetryScriptPath]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateKeyValue(text, "battery") }
   }
 
@@ -298,7 +330,7 @@ Panel {
     id: notifyProc
   }
 
-  function setChargeLimit(limit) {
+  function setChargeLimit(limit: string) {
     if (!limit || chargeLimitProc.running) return
     chargeLimitProc.command = ["omarchy", "battery", "charge", "limit", String(limit)]
     chargeLimitProc.running = true
@@ -308,7 +340,13 @@ Panel {
     setChargeLimit(root.currentChargeLimit === 80 ? 100 : 80)
   }
 
-  Timer { interval: 5000; running: root.opened; repeat: true; onTriggered: root.refresh() }
+  Timer { interval: 2000; running: root.opened; repeat: true; onTriggered: root.refresh() }
+  Timer {
+    interval: 5000
+    running: !root.opened && root.batteryPresent && root.showWatts
+    repeat: true
+    onTriggered: if (!batteryProc.running) batteryProc.running = true
+  }
 
   // Rotate the status phrase while the panel is open and we're in a
   // rotating state (charging or on battery). The text swap is wrapped in a
@@ -357,11 +395,12 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.showPercentage && !vertical
-      ? Math.round(root.batteryFraction * 100) + "% " + root.batteryIcon()
-      : root.batteryIcon()
-    slotSize: Style.bar.iconSlot * (root.showPercentage && !vertical ? 2 : 1)
-    tooltipText: root.hasChargeLimit ? "Left: Open · Middle: Limit (" + root.currentChargeLimit + "%) · Right: %" : ""
+    text: root.barText
+    slotSize: Style.bar.iconSlot * (!vertical ? (root.showPercentage && root.showWatts ? 3.1 : (root.showPercentage || root.showWatts ? 2.1 : 1)) : 1)
+    tooltipText: {
+      var load = root.batteryInfo.system_power ? "Load: " + root.batteryInfo.system_power + " · " : ""
+      return load + (root.hasChargeLimit ? "Left: Open · Middle: Limit (" + root.currentChargeLimit + "%) · Right: Bar Mode" : "Left: Open · Right: Bar Mode")
+    }
     onPressed: function(b) {
       if (!root.batteryPresent) return
       if (b === Qt.RightButton) root.togglePercentage()
@@ -514,20 +553,38 @@ Panel {
           Column {
             width: (parent.width - parent.spacing) / 2
             spacing: Style.spacing.labelGap
-            InfoPair { label: "Battery size"; value: root.batteryInfo.size || "" }
+            InfoPair { label: "System load"; value: root.batteryInfo.system_power || "—" }
+            InfoPair { label: "AC input"; value: root.batteryInfo.ac_power || (root.discharging ? "Offline" : "—") }
+            InfoPair {
+              visible: !!root.batteryInfo.rails
+              label: "3.8V / Heatpipe"
+              value: root.batteryInfo.rails || "—"
+            }
+            InfoPair { label: "Battery health"; value: root.batteryInfo.health || root.batteryInfo.size || "—" }
             InfoPair { label: "Charge cycles"; value: root.batteryInfo.cycles || "—" }
           }
 
           Column {
             width: (parent.width - parent.spacing) / 2
             spacing: Style.spacing.labelGap
+            InfoPair { label: "Battery flow"; value: root.batteryInfo.battery_flow || (root.chargeThresholdActive ? "Holding" : (root.batteryInfo.rate || "—")) }
             InfoPair {
-              label: root.chargeThresholdActive ? "Charge limit" : (root.discharging ? "Time left" : "Time to full")
-              value: root.chargeThresholdActive ? (root.currentChargeLimit ? root.currentChargeLimit + "%" : (root.batteryInfo.threshold || "-")) : (root.batteryFlowIdle ? "-" : (root.batteryInfo.time || "—"))
+              label: (!root.discharging && root.batteryInfo.ac_vi) ? "Charger V / I" : (root.discharging ? "Time left" : "Time to full")
+              value: (!root.discharging && root.batteryInfo.ac_vi) ? root.batteryInfo.ac_vi : (root.batteryFlowIdle ? "—" : (root.batteryInfo.time || "—"))
             }
             InfoPair {
-              label: root.chargeThresholdActive ? "Battery state" : (root.discharging ? "Discharging" : "Charging")
-              value: root.chargeThresholdActive ? "Holding" : (root.batteryFull ? "-" : (root.batteryInfo.rate || ""))
+              visible: !!root.batteryInfo.fans
+              label: "Fans"
+              value: root.batteryInfo.fans || "—"
+            }
+            InfoPair {
+              label: root.chargeThresholdActive ? "Charge limit" : (root.discharging ? "Time left" : "Time to full")
+              value: root.chargeThresholdActive ? (root.batteryInfo.threshold || (root.currentChargeLimit ? root.currentChargeLimit + "%" : "—")) : (root.batteryFlowIdle ? "—" : (root.batteryInfo.time || "—"))
+            }
+            InfoPair {
+              visible: !!root.batteryInfo.temp_volt
+              label: "Temp / Voltage"
+              value: root.batteryInfo.temp_volt || "—"
             }
           }
         }
