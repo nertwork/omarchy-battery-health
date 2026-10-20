@@ -1,12 +1,23 @@
+var PROFILE_ORDER = ["power-saver", "balanced", "performance"]
+
 function clampIndex(index, length) {
   if (length <= 0) return 0
   return Math.max(0, Math.min(length - 1, index))
 }
 
 function selectProfileIndex(index, delta, profiles) {
-  var values = Array.isArray(profiles) ? profiles : []
-  if (values.length === 0) return 0
-  return clampIndex(index + delta, values.length)
+  var values = (Array.isArray(profiles) && profiles.length > 0) ? profiles : PROFILE_ORDER
+  var n = values.length
+  if (n === 0) return 0
+  return ((index + delta) % n + n) % n
+}
+
+function nextProfile(activeProfile, profiles) {
+  var values = (Array.isArray(profiles) && profiles.length > 0) ? profiles : PROFILE_ORDER
+  if (values.length === 0) return "balanced"
+  var idx = values.indexOf(activeProfile)
+  if (idx < 0) return values[0]
+  return values[(idx + 1) % values.length]
 }
 
 function parseKeyValue(raw) {
@@ -22,18 +33,26 @@ function parseKeyValue(raw) {
 
 function parseProfiles(raw, previousIndex) {
   var lines = String(raw || "").split("\n")
-  var list = []
+  var seen = {}
   var active = ""
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i].trim()
     if (!line) continue
     var parts = line.split("\t")
-    list.push(parts[0])
-    if (parts[1] === "1") active = parts[0]
+    var name = parts[0]
+    seen[name] = true
+    if (parts[1] === "1") active = name
+  }
+  var list = []
+  for (var j = 0; j < PROFILE_ORDER.length; j++) {
+    list.push(PROFILE_ORDER[j])
+  }
+  for (var k in seen) {
+    if (list.indexOf(k) === -1) list.push(k)
   }
   return {
     profiles: list,
-    activeProfile: active,
+    activeProfile: active || "balanced",
     profileIndex: clampIndex(previousIndex || 0, list.length)
   }
 }
@@ -91,8 +110,10 @@ function modeLabel(device, onBattery, states) {
 
 if (typeof module !== "undefined") {
   module.exports = {
+    PROFILE_ORDER: PROFILE_ORDER,
     clampIndex: clampIndex,
     selectProfileIndex: selectProfileIndex,
+    nextProfile: nextProfile,
     parseKeyValue: parseKeyValue,
     parseProfiles: parseProfiles,
     profileIcon: profileIcon,

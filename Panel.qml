@@ -15,8 +15,9 @@ Panel {
   manageIpc: false
   property var batteryInfo: ({})
   property var systemInfo: ({})
-  property var profiles: []
-  property string activeProfile: ""
+  property var profiles: ["power-saver", "balanced", "performance"]
+  property string activeProfile: "balanced"
+  property string pendingProfile: ""
   property int profileIndex: 0
   property bool cursorActive: false
   readonly property bool showPercentage: setting("showPercentage", false) === true
@@ -57,6 +58,7 @@ Panel {
   Component.onCompleted: {
     updateLimit()
     if (!batteryProc.running) batteryProc.running = true
+    if (!profilesProc.running) profilesProc.running = true
   }
   readonly property bool hasBarText: (showPercentage || showWatts) && !button.vertical
   readonly property string barText: {
@@ -208,18 +210,33 @@ Panel {
     // transient empty payloads so the buttons don't blink out.
     if (parsed.profiles.length === 0) return
     profiles = parsed.profiles
-    activeProfile = parsed.activeProfile
-    profileIndex = parsed.profileIndex
-    if (opened && !cursorActive) {
-      var idx = profiles.indexOf(activeProfile)
-      if (idx >= 0) profileIndex = idx
+    if (!actionProc.running && !root.pendingProfile) {
+      activeProfile = parsed.activeProfile
+      profileIndex = parsed.profileIndex
+      if (opened && !cursorActive) {
+        var idx = profiles.indexOf(activeProfile)
+        if (idx >= 0) profileIndex = idx
+      }
     }
   }
 
   function setProfile(profile) {
-    if (!profile || actionProc.running) return
+    if (!profile) return
+    root.activeProfile = profile
+    var idx = root.profiles.indexOf(profile)
+    if (idx >= 0) root.profileIndex = idx
+    if (actionProc.running) {
+      root.pendingProfile = profile
+      return
+    }
+    root.pendingProfile = ""
     actionProc.command = ["omarchy-powerprofiles-set", root.discharging ? "battery" : "ac", profile]
     actionProc.running = true
+  }
+
+  function cycleProfile() {
+    var next = Model.nextProfile(root.activeProfile, root.profiles)
+    setProfile(next)
   }
 
   function togglePercentage() {
@@ -250,6 +267,8 @@ Panel {
     function togglePercentage() { root.togglePercentage() }
     function toggleChargeLimit() { root.toggleChargeLimit() }
     function setChargeLimit(limit: string) { root.setChargeLimit(parseInt(limit)) }
+    function cycleProfile() { root.cycleProfile() }
+    function setProfile(profile: string) { root.setProfile(profile) }
   }
 
   IpcHandler {
@@ -263,6 +282,8 @@ Panel {
     function togglePercentage() { root.togglePercentage() }
     function toggleChargeLimit() { root.toggleChargeLimit() }
     function setChargeLimit(limit: string) { root.setChargeLimit(parseInt(limit)) }
+    function cycleProfile() { root.cycleProfile() }
+    function setProfile(profile: string) { root.setProfile(profile) }
   }
 
   onOpenedChanged: {
@@ -305,7 +326,17 @@ Panel {
 
   Process {
     id: actionProc
-    onExited: root.refresh()
+    onExited: {
+      if (root.pendingProfile) {
+        var next = root.pendingProfile
+        root.pendingProfile = ""
+        actionProc.command = ["omarchy-powerprofiles-set", root.discharging ? "battery" : "ac", next]
+        actionProc.running = true
+        return
+      }
+      if (!profilesProc.running) profilesProc.running = true
+      root.refresh()
+    }
   }
 
   Process {
@@ -345,7 +376,10 @@ Panel {
     interval: 5000
     running: !root.opened && root.batteryPresent && root.showWatts
     repeat: true
-    onTriggered: if (!batteryProc.running) batteryProc.running = true
+    onTriggered: {
+      if (!batteryProc.running) batteryProc.running = true
+      if (!profilesProc.running) profilesProc.running = true
+    }
   }
 
   // Rotate the status phrase while the panel is open and we're in a
@@ -399,7 +433,8 @@ Panel {
     slotSize: !vertical && root.hasBarText ? Math.max(Style.bar.iconSlot, Math.ceil(button.glyphPaintedWidth + Style.space(14))) : Style.bar.iconSlot
     tooltipText: {
       var load = root.batteryInfo.system_power ? "Load: " + root.batteryInfo.system_power + " · " : ""
-      return load + (root.hasChargeLimit ? "Left: Open · Middle: Limit (" + root.currentChargeLimit + "%) · Right: Bar Mode" : "Left: Open · Right: Bar Mode")
+      var prof = root.activeProfile ? "Profile: " + root.activeProfile + " · " : ""
+      return load + prof + (root.hasChargeLimit ? "Left: Open · Middle: Limit (" + root.currentChargeLimit + "%) · Right: Bar Mode" : "Left: Open · Right: Bar Mode")
     }
     onPressed: function(b) {
       if (!root.batteryPresent) return
