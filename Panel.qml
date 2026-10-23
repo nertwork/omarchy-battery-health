@@ -414,13 +414,13 @@ Panel {
     function show() { root.open() }
     function hide() { root.close() }
     function toggle() { root.toggle() }
-    function togglePercentage() { root.cycleDisplayMode(); return root.displayMode }
-    function cycleDisplayMode() { root.cycleDisplayMode(); return root.displayMode }
-    function cycle() { root.cycleDisplayMode(); return root.displayMode }
-    function setDisplayMode(mode: string) { root.setDisplayMode(mode); return root.displayMode }
-    function setMode(mode: string) { root.setDisplayMode(mode); return root.displayMode }
-    function getDisplayMode() { return root.displayMode }
-    function getMode() { return root.displayMode }
+    function togglePercentage(): string { root.cycleDisplayMode(); return root.displayMode }
+    function cycleDisplayMode(): string { root.cycleDisplayMode(); return root.displayMode }
+    function cycle(): string { root.cycleDisplayMode(); return root.displayMode }
+    function setDisplayMode(mode: string): string { root.setDisplayMode(mode); return root.displayMode }
+    function setMode(mode: string): string { root.setDisplayMode(mode); return root.displayMode }
+    function getDisplayMode(): string { return root.displayMode }
+    function getMode(): string { return root.displayMode }
     function toggleChargeLimit() { root.toggleChargeLimit() }
     function setChargeLimit(limit: string) { root.setChargeLimit(parseInt(limit)) }
     function cycleProfile() { root.cycleProfile() }
@@ -435,13 +435,13 @@ Panel {
     function show() { root.open() }
     function hide() { root.close() }
     function toggle() { root.toggle() }
-    function togglePercentage() { root.cycleDisplayMode(); return root.displayMode }
-    function cycleDisplayMode() { root.cycleDisplayMode(); return root.displayMode }
-    function cycle() { root.cycleDisplayMode(); return root.displayMode }
-    function setDisplayMode(mode: string) { root.setDisplayMode(mode); return root.displayMode }
-    function setMode(mode: string) { root.setDisplayMode(mode); return root.displayMode }
-    function getDisplayMode() { return root.displayMode }
-    function getMode() { return root.displayMode }
+    function togglePercentage(): string { root.cycleDisplayMode(); return root.displayMode }
+    function cycleDisplayMode(): string { root.cycleDisplayMode(); return root.displayMode }
+    function cycle(): string { root.cycleDisplayMode(); return root.displayMode }
+    function setDisplayMode(mode: string): string { root.setDisplayMode(mode); return root.displayMode }
+    function setMode(mode: string): string { root.setDisplayMode(mode); return root.displayMode }
+    function getDisplayMode(): string { return root.displayMode }
+    function getMode(): string { return root.displayMode }
     function toggleChargeLimit() { root.toggleChargeLimit() }
     function setChargeLimit(limit: string) { root.setChargeLimit(parseInt(limit)) }
     function cycleProfile() { root.cycleProfile() }
