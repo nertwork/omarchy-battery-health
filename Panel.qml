@@ -672,7 +672,7 @@ Panel {
             Text {
               id: heroStatus
               text: root.heroStatusText.toUpperCase()
-              color: Commons.Color.blend(root.bar.foreground, root.bar.background, 0.55)
+              color: Qt.darker(root.bar.foreground, 1.4)
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
               font.letterSpacing: 0.6
@@ -700,7 +700,7 @@ Panel {
           width: parent.width
           height: Style.space(10)
           radius: height / 2
-          color: Commons.Color.blend(root.bar.foreground, root.bar.background, 0.12)
+          color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.12)
           clip: true
 
           Rectangle {
@@ -1069,7 +1069,8 @@ Panel {
   }
 
   component InfoLabel: Text {
-    color: Commons.Color.blend(root.bar.foreground, root.bar.background, 0.5)
+    color: root.bar.foreground
+    opacity: 0.6
     font.family: root.bar.fontFamily
     font.pixelSize: Style.font.bodySmall
   }
