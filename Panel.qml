@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Services.UPower
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -20,7 +21,7 @@ Panel {
   property string pendingProfile: ""
   property int profileIndex: 0
   property bool cursorActive: false
-  readonly property bool showPercentage: setting("showPercentage", false) === true
+  readonly property bool showPercentage: setting("showPercentage", true) !== false
   readonly property bool showWatts: setting("showWatts", true) !== false
   property int currentChargeLimit: 80
   property bool hasChargeLimit: false
@@ -31,15 +32,27 @@ Panel {
     return decodeURIComponent(url)
   }
 
+  property string chargeLimitPath: "/sys/class/power_supply/macsmc-battery/charge_control_end_threshold"
+
   FileView {
     id: chargeLimitFile
-    path: "/sys/class/power_supply/macsmc-battery/charge_control_end_threshold"
+    path: root.chargeLimitPath
     watchChanges: true
     printErrors: false
     blockAllReads: true
     onFileChanged: reload()
     onLoaded: root.updateLimit()
-    onLoadFailed: root.hasChargeLimit = false
+    onLoadFailed: {
+      if (root.batteryInfo && root.batteryInfo.charge_limit_end) {
+        var parsed = parseInt(root.batteryInfo.charge_limit_end)
+        if (!isNaN(parsed)) {
+          root.currentChargeLimit = parsed
+          root.hasChargeLimit = true
+          return
+        }
+      }
+      root.hasChargeLimit = false
+    }
   }
 
   function updateLimit() {
@@ -52,6 +65,14 @@ Panel {
         return
       }
     }
+    if (root.batteryInfo && root.batteryInfo.charge_limit_end) {
+      var fallback = parseInt(root.batteryInfo.charge_limit_end)
+      if (!isNaN(fallback)) {
+        root.currentChargeLimit = fallback
+        root.hasChargeLimit = true
+        return
+      }
+    }
     root.hasChargeLimit = false
   }
 
@@ -60,21 +81,29 @@ Panel {
     if (!batteryProc.running) batteryProc.running = true
     if (!profilesProc.running) profilesProc.running = true
   }
-  readonly property bool hasBarText: (showPercentage || showWatts) && !button.vertical
-  readonly property string barText: {
-    if (button.vertical) return root.batteryIcon()
+  readonly property string barLabelText: {
+    if (button.vertical) return ""
     var pct = Math.round(root.batteryFraction * 100) + "%"
     var watts = root.batteryInfo.system_power_short || root.batteryInfo.system_power || ""
     var parts = []
     if (root.showPercentage) parts.push(pct)
     if (root.showWatts && watts) parts.push(watts)
-    if (parts.length === 0) return root.batteryIcon()
-    return parts.join(" · ") + "  " + root.batteryIcon()
+    return parts.join(" · ")
   }
-  // With percentage/wattage shown the button paints a text block wider than an
-  // icon, so the open-panel mark takes the painted width instead of the
-  // icon-sized fraction of the slot the fallback assumes.
-  readonly property real openPanelIndicatorWidth: hasBarText ? button.glyphPaintedWidth : 0
+  readonly property bool hasBarText: root.barLabelText !== "" && !button.vertical
+
+  TextMetrics {
+    id: barLabelMetrics
+    font.family: button.fontFamily
+    font.pixelSize: button.fontSize
+    text: root.barLabelText
+  }
+
+  // With percentage/wattage shown the button paints a label to the left of the
+  // icon, so the open-panel mark spans both label and glyph.
+  readonly property real openPanelIndicatorWidth: hasBarText
+    ? Math.ceil(barLabelMetrics.advanceWidth + Style.space(4) + button.glyphPaintedWidth)
+    : 0
   readonly property bool batteryPresent: {
     var device = UPower.displayDevice
     return !!(device && device.isPresent)
@@ -139,7 +168,7 @@ Panel {
   }
 
   readonly property color batteryFillColor: {
-    return root.bar ? root.bar.foreground : Color.foreground
+    return root.bar ? root.bar.foreground : Commons.Color.foreground
   }
 
   // Cute agent-flavored phrases shown in the hero status line, rotated on a
@@ -200,8 +229,21 @@ Panel {
     // Keep last known good data if a refresh briefly returns nothing — happens
     // around AC plug/unplug events. Avoids the section collapsing mid-transition.
     if (Object.keys(next).length === 0) return
-    if (targetName === "battery") batteryInfo = next
-    else systemInfo = next
+    if (targetName === "battery") {
+      batteryInfo = next
+      if (next.charge_limit_path && next.charge_limit_path !== root.chargeLimitPath) {
+        root.chargeLimitPath = next.charge_limit_path
+      }
+      if (next.charge_limit_end) {
+        var lim = parseInt(next.charge_limit_end)
+        if (!isNaN(lim)) {
+          root.currentChargeLimit = lim
+          root.hasChargeLimit = true
+        }
+      }
+    } else {
+      systemInfo = next
+    }
   }
 
   function updateProfiles(raw) {
@@ -363,7 +405,7 @@ Panel {
 
   function setChargeLimit(limit: string) {
     if (!limit || chargeLimitProc.running) return
-    chargeLimitProc.command = ["omarchy", "battery", "charge", "limit", String(limit)]
+    chargeLimitProc.command = ["omarchy-battery-charge-limit", String(limit)]
     chargeLimitProc.running = true
   }
 
@@ -429,8 +471,9 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.barText
-    slotSize: !vertical && root.hasBarText ? Math.max(Style.bar.iconSlot, Math.ceil(button.glyphPaintedWidth + Style.space(14))) : Style.bar.iconSlot
+    text: root.batteryIcon()
+    labelText: root.barLabelText
+    slotSize: !vertical && root.hasBarText ? Math.max(Style.bar.iconSlot, Math.ceil(barLabelMetrics.advanceWidth + Style.space(4) + Style.bar.iconSlot)) : Style.bar.iconSlot
     tooltipText: {
       var load = root.batteryInfo.system_power ? "Load: " + root.batteryInfo.system_power + " · " : ""
       var prof = root.activeProfile ? "Profile: " + root.activeProfile + " · " : ""
@@ -591,9 +634,9 @@ Panel {
             InfoPair { label: "System load"; value: root.batteryInfo.system_power || "—" }
             InfoPair { label: "AC input"; value: root.batteryInfo.ac_power || (root.discharging ? "Offline" : "—") }
             InfoPair {
-              visible: !!root.batteryInfo.rails
-              label: "3.8V / Heatpipe"
-              value: root.batteryInfo.rails || "—"
+              visible: !!(root.batteryInfo.rails || root.batteryInfo.cpu_gpu)
+              label: root.batteryInfo.cpu_gpu ? "CPU / dGPU" : "3.8V / Heatpipe"
+              value: root.batteryInfo.cpu_gpu || root.batteryInfo.rails || "—"
             }
             InfoPair { label: "Battery health"; value: root.batteryInfo.health || root.batteryInfo.size || "—" }
             InfoPair { label: "Charge cycles"; value: root.batteryInfo.cycles || "—" }
