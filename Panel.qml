@@ -28,6 +28,7 @@ Panel {
   //   "icon"       -> Battery icon only
   property string displayMode: "both"
   property bool configLoaded: false
+  property bool isIpcOwner: false
   readonly property string configPath: (Quickshell.env("HOME") || "/home/jfarr") + "/.local/state/omarchy/settings/nertwork.power.json"
 
   readonly property bool showPercentage: root.displayMode === "both" || root.displayMode === "percentage"
@@ -193,6 +194,7 @@ Panel {
   }
 
   Component.onCompleted: {
+    if (!Commons.IpcRegistry.handlerFor("nertwork.power")) root.isIpcOwner = true
     applySettingsFromShell()
     updateLimit()
     if (!batteryProc.running) batteryProc.running = true
@@ -403,6 +405,7 @@ Panel {
   }
 
   ShellIpc {
+    enabled: root.isIpcOwner
     target: "omarchy.power"
 
     function open() { root.open() }
@@ -424,6 +427,7 @@ Panel {
   }
 
   ShellIpc {
+    enabled: root.isIpcOwner
     target: "nertwork.power"
 
     function open() { root.open() }
