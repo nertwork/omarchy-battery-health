@@ -1,24 +1,32 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Share a short-lived (1.2s) telemetry snapshot across concurrent multi-monitor
-# bar instances so all monitors display identical readings and Intel RAPL / dGPU
-# queries run once per 5s tick instead of once per monitor.
-uid_tag="${UID:-1000}"
-cache_file="/tmp/omarchy-power-telemetry-${uid_tag}.cache"
-ts_file="/tmp/omarchy-power-telemetry-${uid_tag}.ts"
-lock_file="/tmp/omarchy-power-telemetry-${uid_tag}.lock"
+# Short 1.2s cache + flock so multiple monitor bar instances share a single sample
+cache_file="/tmp/omarchy-power-telemetry-${UID:-1000}.cache"
+lock_file="/tmp/omarchy-power-telemetry-${UID:-1000}.lock"
 
 if [[ "${1:-}" != "--no-cache" ]]; then
-  exec 9>"$lock_file"
-  flock -w 2 9 || true
-  now_check_ns="$(date +%s%N)"
-  if [[ -r "$ts_file" && -s "$cache_file" ]]; then
-    cache_ns="$(<"$ts_file")"
-    if [[ "$cache_ns" =~ ^[0-9]+$ ]] && (( now_check_ns - cache_ns >= 0 && now_check_ns - cache_ns < 1200000000 )); then
+  if [[ -r "$cache_file" ]]; then
+    now_ms="$(date +%s%3N)"
+    mtime_ms="$(stat -c %Y "$cache_file" 2>/dev/null || echo 0)000"
+    if (( now_ms - mtime_ms < 1200 )) && [[ -s "$cache_file" ]]; then
       cat "$cache_file"
       exit 0
     fi
+  fi
+  exec 9>"$lock_file"
+  if flock -w 2 9; then
+    if [[ -r "$cache_file" ]]; then
+      now_ms="$(date +%s%3N)"
+      mtime_ms="$(stat -c %Y "$cache_file" 2>/dev/null || echo 0)000"
+      if (( now_ms - mtime_ms < 1200 )) && [[ -s "$cache_file" ]]; then
+        cat "$cache_file"
+        exit 0
+      fi
+    fi
+    "$0" --no-cache > "${cache_file}.tmp" && mv -f "${cache_file}.tmp" "$cache_file"
+    cat "$cache_file"
+    exit 0
   fi
 fi
 
@@ -81,7 +89,7 @@ if [[ -r /sys/class/powercap/intel-rapl:0/energy_uj ]]; then
   psys1=0
   [[ -r /sys/class/powercap/intel-rapl:1/energy_uj ]] && psys1="$(</sys/class/powercap/intel-rapl:1/energy_uj)"
   max_uj="$(cat /sys/class/powercap/intel-rapl:0/max_energy_range_uj 2>/dev/null || echo 262143328850)"
-  state_file="/tmp/omarchy-rapl-${uid_tag}.state"
+  state_file="/tmp/omarchy-rapl-${UID:-1000}.state"
   prev_ns=0; prev_pkg=0; prev_psys=0
   if [[ -r "$state_file" ]]; then
     read -r prev_ns prev_pkg prev_psys < "$state_file" 2>/dev/null || true
@@ -127,63 +135,50 @@ if [[ -r /sys/bus/pci/devices/0000:01:00.0/power/runtime_status ]]; then
   fi
 fi
 
-output="$(awk -v bat_dir="$bat_dir" -v ac_dir="$ac_dir" -v smc_dir="$smc_dir" -v tp_dir="$tp_dir" \
+awk -v bat_dir="$bat_dir" -v ac_dir="$ac_dir" -v smc_dir="$smc_dir" -v tp_dir="$tp_dir" \
     -v rapl_pkg_w="$rapl_pkg_w" -v rapl_psys_w="$rapl_psys_w" \
     -v dgpu_label="$dgpu_label" -v dgpu_num_w="$dgpu_num_w" \
     -v ucsi_v_uv="$ucsi_v_uv" -v ucsi_i_ua="$ucsi_i_ua" -v ucsi_imax_ua="$ucsi_imax_ua" \
     -v orig_pct="${kv[percentage]:-}" \
     -v orig_state="${kv[state]:-}" \
     -v orig_rate="${kv[rate]:-}" \
-    -v orig_time="${kv[time]:-}" \
     -v orig_size="${kv[size]:-}" \
     -v orig_design="${kv[design_size]:-}" \
+    -v orig_time="${kv[time]:-}" \
     -v orig_thresh="${kv[threshold]:-}" '
 function read_file(path,    val) {
   val = ""
   if (path != "" && (getline val < path) > 0) {
     close(path)
-    sub(/^[ \t\r\n]+/, "", val)
-    sub(/[ \t\r\n]+$/, "", val)
     return val
   }
   close(path)
   return ""
 }
+function fmt_short_w(w) {
+  if (w <= 0) return "0W"
+  if (w < 1.0) return sprintf("%.1fW", w)
+  return sprintf("%.0fW", w)
+}
 BEGIN {
-  # Map macsmc_hwmon labels if available
-  sys_uw = ""; ac_uw = ""; rail_uw = ""; heat_uw = ""
-  in_mv = ""; in_ma = ""
-  fan1 = ""; fan2 = ""
+  # SMC telemetry (Apple Silicon)
+  sys_uw  = read_file(smc_dir "/power1_input")
+  ac_uw   = read_file(smc_dir "/power2_input")
+  rail_uw = read_file(smc_dir "/power3_input")
+  heat_uw = read_file(smc_dir "/power4_input")
+  in_mv   = read_file(smc_dir "/in0_input")
+  in_ma   = read_file(smc_dir "/curr1_input")
+  fan1    = read_file(smc_dir "/fan1_input")
+  fan2    = read_file(smc_dir "/fan2_input")
 
-  if (smc_dir != "") {
-    for (i = 1; i <= 40; i++) {
-      lbl = read_file(smc_dir "/power" i "_label")
-      if (lbl == "Total System")          sys_uw  = read_file(smc_dir "/power" i "_input")
-      else if (lbl == "AC Input")         ac_uw   = read_file(smc_dir "/power" i "_input")
-      else if (lbl == "3.8V Rail")        rail_uw = read_file(smc_dir "/power" i "_input")
-      else if (lbl == "Heatpipe")         heat_uw = read_file(smc_dir "/power" i "_input")
-    }
-    for (i = 1; i <= 25; i++) {
-      lbl = read_file(smc_dir "/in" i "_label")
-      if (lbl == "Charger (CH0I)")        in_mv = read_file(smc_dir "/in" i "_input")
-    }
-    for (i = 1; i <= 25; i++) {
-      lbl = read_file(smc_dir "/curr" i "_label")
-      if (lbl == "Charger Limit")         in_ma = read_file(smc_dir "/curr" i "_input")
-    }
-    fan1 = read_file(smc_dir "/fan1_input")
-    fan2 = read_file(smc_dir "/fan2_input")
+  # ThinkPad hwmon fallback for fans & CPU temp
+  if (fan1 == "" && tp_dir != "") {
+    fan1 = read_file(tp_dir "/fan1_input")
+    fan2 = read_file(tp_dir "/fan2_input")
   }
+  tp_temp_mc = (tp_dir != "") ? read_file(tp_dir "/temp1_input") : ""
 
-  # Map ThinkPad hwmon fans & temperatures if available
-  tp_temp_mc = ""
-  if (tp_dir != "") {
-    if (fan1 == "") fan1 = read_file(tp_dir "/fan1_input")
-    if (fan2 == "") fan2 = read_file(tp_dir "/fan2_input")
-    tp_temp_mc = read_file(tp_dir "/temp1_input")
-  }
-
-  # USB-C PD fallback for charger V / I on x86_64
+  # USB-C PD fallback for charger V/I on ThinkPad
   if (in_mv == "" && ucsi_v_uv != "" && ucsi_v_uv + 0 > 0) {
     in_mv = (ucsi_v_uv + 0) / 1000.0
     if (ucsi_i_ua != "" && ucsi_i_ua + 0 > 0) {
@@ -236,23 +231,27 @@ BEGIN {
   if (sys_uw != "" && sys_uw + 0 > 0) {
     sys_w = (sys_uw + 0) / 1000000.0
     system_power = sprintf("%.1fW", sys_w)
-    system_power_short = sprintf("%.0fW", sys_w)
+    system_power_short = fmt_short_w(sys_w)
+  } else if (ac_uw != "" && ac_uw + 0 > 0) {
+    sys_w = (ac_uw + 0) / 1000000.0
+    system_power = sprintf("%.1fW", sys_w)
+    system_power_short = fmt_short_w(sys_w)
   } else if (state == "discharging" && bat_w > 0) {
     sys_w = bat_w
     system_power = sprintf("%.1fW", sys_w)
-    system_power_short = sprintf("%.0fW", sys_w)
+    system_power_short = fmt_short_w(sys_w)
   } else if (rapl_psys_w != "" && rapl_psys_w + 0 > 0) {
     sys_w = rapl_psys_w + 0
     system_power = sprintf("%.1fW", sys_w)
-    system_power_short = sprintf("%.0fW", sys_w)
+    system_power_short = fmt_short_w(sys_w)
   } else if (rapl_pkg_w != "" && rapl_pkg_w + 0 > 0) {
     sys_w = (rapl_pkg_w + 0) + (dgpu_num_w + 0)
     system_power = sprintf("%.1fW", sys_w)
-    system_power_short = sprintf("%.0fW", sys_w)
+    system_power_short = fmt_short_w(sys_w)
   } else if (bat_w > 0) {
     sys_w = bat_w
     system_power = sprintf("%.1fW", sys_w)
-    system_power_short = sprintf("%.0fW", sys_w)
+    system_power_short = fmt_short_w(sys_w)
   } else {
     system_power = rate != "" ? rate : "0.0W"
     system_power_short = "0W"
@@ -424,10 +423,4 @@ BEGIN {
     print "charge_limit_path\t" bat_dir "/charge_control_end_threshold"
   }
 }
-')"
-
-if [[ -n "$output" ]]; then
-  printf '%s\n' "$output" > "${cache_file}.tmp" 2>/dev/null && mv -f "${cache_file}.tmp" "$cache_file" 2>/dev/null || true
-  date +%s%N > "$ts_file" 2>/dev/null || true
-  printf '%s\n' "$output"
-fi
+'

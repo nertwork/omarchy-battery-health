@@ -28,11 +28,6 @@ Panel {
   //   "icon"       -> Battery icon only
   property string displayMode: "both"
   property bool configLoaded: false
-  readonly property bool isIpcOwner: {
-    if (!root.bar || typeof root.bar.moduleWidgets !== "function") return true
-    var list = root.bar.moduleWidgets(root.moduleName)
-    return !list || list.length === 0 || list[0] === root
-  }
   readonly property string configPath: (Quickshell.env("HOME") || "/home/jfarr") + "/.local/state/omarchy/settings/nertwork.power.json"
 
   readonly property bool showPercentage: root.displayMode === "both" || root.displayMode === "percentage"
@@ -211,6 +206,10 @@ Panel {
       ? (Math.round(root.batteryFraction * 100) + "%")
       : (root.batteryInfo.percentage || "")
     var watts = root.batteryInfo.system_power_short || root.batteryInfo.system_power || ""
+    if (watts === "0W" || watts === "0.0W") {
+      var fallbackRate = root.batteryInfo.rate || ""
+      watts = (fallbackRate && fallbackRate !== "0W" && fallbackRate !== "0.0W") ? fallbackRate : ""
+    }
     var parts = []
     if (root.showPercentage && pct) parts.push(pct)
     if (root.showWatts && watts) parts.push(watts)
@@ -408,7 +407,6 @@ Panel {
   }
 
   ShellIpc {
-    enabled: root.isIpcOwner
     target: "omarchy.power"
 
     function open() { root.open() }
@@ -430,7 +428,6 @@ Panel {
   }
 
   ShellIpc {
-    enabled: root.isIpcOwner
     target: "nertwork.power"
 
     function open() { root.open() }
