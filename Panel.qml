@@ -11,8 +11,7 @@ Panel {
   id: root
   moduleName: "nertwork.power"
   ipcTarget: "nertwork.power"
-  // manageIpc: false so this panel can own the single IpcHandler the target
-  // permits — needed for the togglePercentage method below.
+  // manageIpc: false so this panel can own its custom ShellIpc handlers below.
   manageIpc: false
   property var batteryInfo: ({})
   property var systemInfo: ({})
@@ -21,8 +20,19 @@ Panel {
   property string pendingProfile: ""
   property int profileIndex: 0
   property bool cursorActive: false
-  readonly property bool showPercentage: setting("showPercentage", true) !== false
-  readonly property bool showWatts: setting("showWatts", true) !== false
+
+  // Display mode for the top bar widget:
+  //   "both"       -> Percentage + Live Wattage (e.g. "79% · 32W")
+  //   "percentage" -> Percentage only (e.g. "79%")
+  //   "usage"      -> Live Wattage only (e.g. "32W")
+  //   "icon"       -> Battery icon only
+  property string displayMode: "both"
+  property bool configLoaded: false
+  readonly property string configPath: (Quickshell.env("HOME") || "/home/jfarr") + "/.local/state/omarchy/settings/nertwork.power.json"
+
+  readonly property bool showPercentage: root.displayMode === "both" || root.displayMode === "percentage"
+  readonly property bool showWatts: root.displayMode === "both" || root.displayMode === "usage"
+
   property int currentChargeLimit: 80
   property bool hasChargeLimit: false
 
@@ -33,6 +43,112 @@ Panel {
   }
 
   property string chargeLimitPath: "/sys/class/power_supply/macsmc-battery/charge_control_end_threshold"
+
+  function normalizeMode(m) {
+    var s = String(m || "").trim().toLowerCase()
+    if (s === "both" || s === "all" || s === "full" || s === "pct+watts" || s === "usage+percentage" || s === "percentage+usage") return "both"
+    if (s === "percentage" || s === "percent" || s === "pct" || s === "%") return "percentage"
+    if (s === "usage" || s === "watts" || s === "power" || s === "w" || s === "wattage") return "usage"
+    if (s === "icon" || s === "none" || s === "off") return "icon"
+    return "both"
+  }
+
+  function modeFromLegacyFlags(showPct, showW) {
+    var p = showPct !== false
+    var w = showW !== false
+    if (p && w) return "both"
+    if (p && !w) return "percentage"
+    if (!p && w) return "usage"
+    return "icon"
+  }
+
+  function applySettingsFromShell() {
+    if (!root.settings || typeof root.settings !== "object") return
+    if (root.settings.displayMode !== undefined && String(root.settings.displayMode) !== "") {
+      root.displayMode = root.normalizeMode(root.settings.displayMode)
+    } else if (!root.configLoaded && (root.settings.showPercentage !== undefined || root.settings.showWatts !== undefined)) {
+      root.displayMode = root.modeFromLegacyFlags(root.settings.showPercentage, root.settings.showWatts)
+    }
+  }
+
+  onSettingsChanged: applySettingsFromShell()
+
+  FileView {
+    id: configFile
+    path: root.configPath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      try {
+        var raw = configFile.text().trim()
+        if (raw) {
+          var data = JSON.parse(raw)
+          if (data.displayMode !== undefined && String(data.displayMode) !== "") {
+            root.displayMode = root.normalizeMode(data.displayMode)
+          } else if (data.showPercentage !== undefined || data.showWatts !== undefined) {
+            root.displayMode = root.modeFromLegacyFlags(data.showPercentage, data.showWatts)
+          }
+          root.configLoaded = true
+          if (root.showWatts && !batteryProc.running) batteryProc.running = true
+          return
+        }
+      } catch (e) {}
+      root.configLoaded = true
+      root.applySettingsFromShell()
+    }
+    onLoadFailed: {
+      root.configLoaded = true
+      root.applySettingsFromShell()
+    }
+  }
+
+  Process {
+    id: saveConfigProc
+  }
+
+  function setDisplayMode(mode) {
+    var next = root.normalizeMode(mode)
+    var showPct = (next === "both" || next === "percentage")
+    var showW = (next === "both" || next === "usage")
+    root.displayMode = next
+
+    var payload = JSON.stringify({
+      displayMode: next,
+      showPercentage: showPct,
+      showWatts: showW
+    })
+    saveConfigProc.command = [
+      "bash", "-c",
+      "mkdir -p ~/.local/state/omarchy/settings && printf '%s\\n' \"$1\" > ~/.local/state/omarchy/settings/nertwork.power.json",
+      "_", payload
+    ]
+    saveConfigProc.running = true
+
+    var nextSettings = Object.assign({}, root.settings || {}, {
+      displayMode: next,
+      showPercentage: showPct,
+      showWatts: showW
+    })
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function") {
+      root.bar.shell.updateEntryInline(root.moduleName, nextSettings)
+    }
+    if (showW && !batteryProc.running) batteryProc.running = true
+  }
+
+  function cycleDisplayMode() {
+    if (root.displayMode === "both") {
+      setDisplayMode("percentage")
+    } else if (root.displayMode === "percentage") {
+      setDisplayMode("usage")
+    } else {
+      setDisplayMode("both")
+    }
+  }
+
+  function togglePercentage() {
+    cycleDisplayMode()
+  }
 
   FileView {
     id: chargeLimitFile
@@ -77,16 +193,21 @@ Panel {
   }
 
   Component.onCompleted: {
+    applySettingsFromShell()
     updateLimit()
     if (!batteryProc.running) batteryProc.running = true
     if (!profilesProc.running) profilesProc.running = true
   }
+
   readonly property string barLabelText: {
     if (button.vertical) return ""
-    var pct = Math.round(root.batteryFraction * 100) + "%"
+    var d = UPower.displayDevice
+    var pct = (d && d.isPresent)
+      ? (Math.round(root.batteryFraction * 100) + "%")
+      : (root.batteryInfo.percentage || "")
     var watts = root.batteryInfo.system_power_short || root.batteryInfo.system_power || ""
     var parts = []
-    if (root.showPercentage) parts.push(pct)
+    if (root.showPercentage && pct) parts.push(pct)
     if (root.showWatts && watts) parts.push(watts)
     return parts.join(" · ")
   }
@@ -281,24 +402,7 @@ Panel {
     setProfile(next)
   }
 
-  function togglePercentage() {
-    var nextPct = root.showPercentage
-    var nextWatts = root.showWatts
-    if (!root.showPercentage && root.showWatts) {
-      nextPct = true; nextWatts = true
-    } else if (root.showPercentage && root.showWatts) {
-      nextPct = true; nextWatts = false
-    } else if (root.showPercentage && !root.showWatts) {
-      nextPct = false; nextWatts = false
-    } else {
-      nextPct = false; nextWatts = true
-    }
-    root.settings = Object.assign({}, root.settings, { showPercentage: nextPct, showWatts: nextWatts })
-    if (root.bar && root.bar.shell) root.bar.shell.updateEntryInline(root.moduleName, root.settings)
-    if (nextWatts && !batteryProc.running) batteryProc.running = true
-  }
-
-  IpcHandler {
+  ShellIpc {
     target: "omarchy.power"
 
     function open() { root.open() }
@@ -306,14 +410,20 @@ Panel {
     function show() { root.open() }
     function hide() { root.close() }
     function toggle() { root.toggle() }
-    function togglePercentage() { root.togglePercentage() }
+    function togglePercentage() { root.cycleDisplayMode(); return root.displayMode }
+    function cycleDisplayMode() { root.cycleDisplayMode(); return root.displayMode }
+    function cycle() { root.cycleDisplayMode(); return root.displayMode }
+    function setDisplayMode(mode: string) { root.setDisplayMode(mode); return root.displayMode }
+    function setMode(mode: string) { root.setDisplayMode(mode); return root.displayMode }
+    function getDisplayMode() { return root.displayMode }
+    function getMode() { return root.displayMode }
     function toggleChargeLimit() { root.toggleChargeLimit() }
     function setChargeLimit(limit: string) { root.setChargeLimit(parseInt(limit)) }
     function cycleProfile() { root.cycleProfile() }
     function setProfile(profile: string) { root.setProfile(profile) }
   }
 
-  IpcHandler {
+  ShellIpc {
     target: "nertwork.power"
 
     function open() { root.open() }
@@ -321,7 +431,13 @@ Panel {
     function show() { root.open() }
     function hide() { root.close() }
     function toggle() { root.toggle() }
-    function togglePercentage() { root.togglePercentage() }
+    function togglePercentage() { root.cycleDisplayMode(); return root.displayMode }
+    function cycleDisplayMode() { root.cycleDisplayMode(); return root.displayMode }
+    function cycle() { root.cycleDisplayMode(); return root.displayMode }
+    function setDisplayMode(mode: string) { root.setDisplayMode(mode); return root.displayMode }
+    function setMode(mode: string) { root.setDisplayMode(mode); return root.displayMode }
+    function getDisplayMode() { return root.displayMode }
+    function getMode() { return root.displayMode }
     function toggleChargeLimit() { root.toggleChargeLimit() }
     function setChargeLimit(limit: string) { root.setChargeLimit(parseInt(limit)) }
     function cycleProfile() { root.cycleProfile() }
@@ -331,7 +447,7 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       if (!batteryPresent) {
-        close()
+        Qt.callLater(function() { root.close() })
         return
       }
 
@@ -416,7 +532,7 @@ Panel {
   Timer { interval: 2000; running: root.opened; repeat: true; onTriggered: root.refresh() }
   Timer {
     interval: 5000
-    running: !root.opened && root.batteryPresent && root.showWatts
+    running: !root.opened && root.batteryPresent
     repeat: true
     onTriggered: {
       if (!batteryProc.running) batteryProc.running = true
@@ -477,11 +593,11 @@ Panel {
     tooltipText: {
       var load = root.batteryInfo.system_power ? "Load: " + root.batteryInfo.system_power + " · " : ""
       var prof = root.activeProfile ? "Profile: " + root.activeProfile + " · " : ""
-      return load + prof + (root.hasChargeLimit ? "Left: Open · Middle: Limit (" + root.currentChargeLimit + "%) · Right: Bar Mode" : "Left: Open · Right: Bar Mode")
+      return load + prof + (root.hasChargeLimit ? "Left: Open · Middle: Limit (" + root.currentChargeLimit + "%) · Right: Bar Mode (" + root.displayMode + ")" : "Left: Open · Right: Bar Mode (" + root.displayMode + ")")
     }
     onPressed: function(b) {
       if (!root.batteryPresent) return
-      if (b === Qt.RightButton) root.togglePercentage()
+      if (b === Qt.RightButton) root.cycleDisplayMode()
       else if (b === Qt.MiddleButton && root.hasChargeLimit) root.toggleChargeLimit()
       else root.toggle()
     }
@@ -548,20 +664,18 @@ Panel {
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.title
-              font.bold: true
+              font.weight: Font.Medium
               elide: Text.ElideRight
               width: parent.width
             }
 
             Text {
               id: heroStatus
-              textFormat: Text.PlainText
               text: root.heroStatusText.toUpperCase()
-              color: Qt.darker(root.bar.foreground, 1.4)
+              color: Commons.Color.blend(root.bar.foreground, root.bar.background, 0.55)
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
-              font.bold: true
-              font.letterSpacing: 1.2
+              font.letterSpacing: 0.6
               elide: Text.ElideRight
               width: parent.width
             }
@@ -569,112 +683,174 @@ Panel {
 
           Text {
             id: heroPercent
-            textFormat: Text.PlainText
-            text: root.batteryInfo.percentage || "—"
-            color: root.bar.foreground
+            text: root.batteryInfo.percentage || (Math.round(root.batteryFraction * 100) + "%")
+            color: root.batteryFillColor
             font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.displayLarge
-            font.bold: true
+            font.pixelSize: Style.font.display
+            font.weight: Font.DemiBold
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
 
-            Behavior on color { ColorAnimation { duration: 200 } }
+            Behavior on color { ColorAnimation { duration: 250 } }
           }
         }
 
-        // ---------- Battery progress bar ----------
-        Item {
+        // ---------- Visual level bar ----------
+        Rectangle {
           width: parent.width
-          implicitHeight: Style.space(8)
+          height: Style.space(10)
+          radius: height / 2
+          color: Commons.Color.blend(root.bar.foreground, root.bar.background, 0.12)
+          clip: true
 
           Rectangle {
-            id: barTrack
-            anchors.fill: parent
-            radius: height / 2
-            color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g, root.bar.foreground.b, 0.12)
-          }
-
-          Rectangle {
-            id: barFill
-            anchors.left: barTrack.left
-            anchors.verticalCenter: barTrack.verticalCenter
-            height: barTrack.height
-            radius: barTrack.radius
+            id: fillBar
+            height: parent.height
+            width: Math.max(parent.height, parent.width * root.batteryFraction)
+            radius: parent.radius
             color: root.batteryFillColor
-            width: Math.max(barTrack.height, barTrack.width * root.batteryFraction)
 
-            Behavior on width { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
-            Behavior on color { ColorAnimation { duration: 220 } }
+            Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+            Behavior on color { ColorAnimation { duration: 250 } }
+          }
 
-            // Subtle pulse while charging — visible signal that energy is flowing in.
-            SequentialAnimation on opacity {
-              running: root.charging && !root.fullyCharged && root.opened
+          // Subtle charging shimmer — slides across the filled region while
+          // actively charging so the bar reads as "filling" at a glance.
+          Rectangle {
+            id: shimmer
+            visible: root.charging
+            width: Math.max(Style.space(40), fillBar.width * 0.35)
+            height: parent.height
+            radius: parent.radius
+            opacity: 0.35
+            color: root.bar.background
+            x: -width
+
+            NumberAnimation on x {
+              running: root.opened && root.charging
               loops: Animation.Infinite
-              alwaysRunToEnd: true
-              NumberAnimation { from: 1.0; to: 0.55; duration: 950; easing.type: Easing.InOutSine }
-              NumberAnimation { from: 0.55; to: 1.0; duration: 950; easing.type: Easing.InOutSine }
+              from: -shimmer.width
+              to: fillBar.width
+              duration: 1600
+              easing.type: Easing.InOutSine
             }
           }
         }
 
-        // ---------- Stats ----------
-        // Visibility is intentionally only gated by "we've ever loaded data" so
-        // the section never collapses mid-transition. fullyCharged is *not* part
-        // of the condition: UPower briefly reports FullyCharged on plug-in when
-        // the battery sits above the charge-control start threshold, and we
-        // refuse to flicker the whole panel for that ~1s window.
-        Row {
-          visible: root.batteryInfo.percentage !== undefined
+        // ---------- Power & Battery telemetry grid ----------
+        PanelSeparator {
+          foreground: root.bar.foreground
+          visible: metricsGrid.hasAny
+        }
+
+        Grid {
+          id: metricsGrid
           width: parent.width
-          spacing: Style.space(24)
+          columns: 2
+          columnSpacing: Style.space(22)
+          rowSpacing: Style.space(6)
+          visible: hasAny
 
-          Column {
-            width: (parent.width - parent.spacing) / 2
-            spacing: Style.space(8)
-            InfoPair { label: "System load"; value: root.batteryInfo.system_power || "—" }
-            InfoPair { label: "AC input"; value: root.batteryInfo.ac_power || (root.discharging ? "Offline" : "—") }
-            InfoPair {
-              visible: !!(root.batteryInfo.rails || root.batteryInfo.cpu_gpu)
-              label: root.batteryInfo.cpu_gpu ? "CPU / dGPU" : "3.8V / Heatpipe"
-              value: root.batteryInfo.cpu_gpu || root.batteryInfo.rails || "—"
-            }
-            InfoPair { label: "Battery health"; value: root.batteryInfo.health || root.batteryInfo.size || "—" }
-            InfoPair { label: "Charge cycles"; value: root.batteryInfo.cycles || "—" }
+          readonly property bool hasAny: !!(
+            root.batteryInfo.system_power ||
+            root.batteryInfo.ac_power ||
+            root.batteryInfo.battery_flow ||
+            root.batteryInfo.ac_vi ||
+            root.batteryInfo.rails ||
+            root.batteryInfo.cpu_gpu ||
+            root.batteryInfo.fans ||
+            root.batteryInfo.time ||
+            root.batteryInfo.health ||
+            root.batteryInfo.cycles ||
+            root.batteryInfo.temp_volt ||
+            root.batteryInfo.threshold
+          )
+          readonly property real colWidth: (width - columnSpacing) / 2
+
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.system_power
+            label: "System Load"
+            value: root.batteryInfo.system_power || ""
           }
-
-          Column {
-            width: (parent.width - parent.spacing) / 2
-            spacing: Style.space(8)
-            InfoPair { label: "Battery flow"; value: root.batteryInfo.battery_flow || (root.chargeThresholdActive ? "Holding" : (root.batteryInfo.rate || "—")) }
-            InfoPair {
-              label: (!root.discharging && root.batteryInfo.ac_vi) ? "Charger V / I" : (root.discharging ? "Time left" : "Time to full")
-              value: (!root.discharging && root.batteryInfo.ac_vi) ? root.batteryInfo.ac_vi : (root.batteryFlowIdle ? "—" : (root.batteryInfo.time || "—"))
-            }
-            InfoPair {
-              visible: !!root.batteryInfo.fans
-              label: "Fans"
-              value: root.batteryInfo.fans || "—"
-            }
-            InfoPair {
-              label: root.chargeThresholdActive ? "Charge limit" : (root.discharging ? "Time left" : "Time to full")
-              value: root.chargeThresholdActive ? (root.batteryInfo.threshold || (root.currentChargeLimit ? root.currentChargeLimit + "%" : "—")) : (root.batteryFlowIdle ? "—" : (root.batteryInfo.time || "—"))
-            }
-            InfoPair {
-              visible: !!root.batteryInfo.temp_volt
-              label: "Temp / Voltage"
-              value: root.batteryInfo.temp_volt || "—"
-            }
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.ac_power
+            label: "AC Input"
+            value: root.batteryInfo.ac_power || ""
+          }
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.battery_flow
+            label: "Battery Flow"
+            value: root.batteryInfo.battery_flow || ""
+          }
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.ac_vi
+            label: "Charger V / I"
+            value: root.batteryInfo.ac_vi || ""
+          }
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.rails
+            label: "3.8V / Heatpipe"
+            value: root.batteryInfo.rails || ""
+          }
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.cpu_gpu
+            label: "CPU / dGPU"
+            value: root.batteryInfo.cpu_gpu || ""
+          }
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.fans
+            label: "Cooling Fans"
+            value: root.batteryInfo.fans || ""
+          }
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.health
+            label: "Battery Health"
+            value: root.batteryInfo.health || ""
+          }
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.cycles
+            label: "Cycle Count"
+            value: root.batteryInfo.cycles || ""
+          }
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.temp_volt
+            label: "Temp / Voltage"
+            value: root.batteryInfo.temp_volt || ""
+          }
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.time
+            label: root.discharging ? "Remaining" : "To Full"
+            value: root.batteryInfo.time || ""
+          }
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.threshold
+            label: "Charge Limit"
+            value: root.batteryInfo.threshold || ""
           }
         }
 
         // ---------- Power profile picker ----------
         PanelSeparator {
           foreground: root.bar.foreground
+          visible: root.profiles.length > 0
         }
 
         Column {
           width: parent.width
           spacing: Style.space(10)
+          visible: root.profiles.length > 0
 
           PanelSectionHeader {
             text: "POWER PROFILE"
@@ -793,6 +969,75 @@ Panel {
             }
           }
         }
+
+        // ---------- Bar display mode picker ----------
+        PanelSeparator {
+          foreground: root.bar.foreground
+        }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(10)
+
+          PanelSectionHeader {
+            text: "BAR DISPLAY"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+          }
+
+          Row {
+            id: displayModeRow
+            width: parent.width
+            spacing: Style.space(6)
+
+            readonly property real cellWidth: (width - spacing * 2) / 3
+
+            Button {
+              width: displayModeRow.cellWidth
+              iconText: "󰁹"
+              iconSize: Style.font.title
+              text: "Both (% · W)"
+              fontSize: Style.font.bodySmall
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              active: root.displayMode === "both"
+              onClicked: root.setDisplayMode("both")
+            }
+
+            Button {
+              width: displayModeRow.cellWidth
+              iconText: "󰏰"
+              iconSize: Style.font.title
+              text: "Percent (%)"
+              fontSize: Style.font.bodySmall
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              active: root.displayMode === "percentage"
+              onClicked: root.setDisplayMode("percentage")
+            }
+
+            Button {
+              width: displayModeRow.cellWidth
+              iconText: "󱐋"
+              iconSize: Style.font.title
+              text: "Usage (W)"
+              fontSize: Style.font.bodySmall
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              active: root.displayMode === "usage"
+              onClicked: root.setDisplayMode("usage")
+            }
+          }
+        }
       }
     }
   }
@@ -819,23 +1064,21 @@ Panel {
       anchors.leftMargin: Style.space(10)
       anchors.verticalCenter: parent.verticalCenter
       horizontalAlignment: Text.AlignRight
-      elide: Text.ElideRight
       text: parent.value
     }
   }
 
   component InfoLabel: Text {
-    textFormat: Text.PlainText
-    color: root.bar.foreground
-    opacity: 0.6
+    color: Commons.Color.blend(root.bar.foreground, root.bar.background, 0.5)
     font.family: root.bar.fontFamily
     font.pixelSize: Style.font.bodySmall
   }
 
   component InfoValue: Text {
-    textFormat: Text.PlainText
     color: root.bar.foreground
     font.family: root.bar.fontFamily
     font.pixelSize: Style.font.bodySmall
+    font.weight: Font.Medium
+    elide: Text.ElideRight
   }
 }
