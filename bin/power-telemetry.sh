@@ -1,32 +1,84 @@
 #!/usr/bin/env bash
 set -uo pipefail
+export LC_ALL=C
 
-# Short 1.2s cache + flock so multiple monitor bar instances share a single sample
-cache_file="/tmp/omarchy-power-telemetry-${UID:-1000}.cache"
-lock_file="/tmp/omarchy-power-telemetry-${UID:-1000}.lock"
+is_uint() {
+  [[ "${1:-}" =~ ^[0-9]{1,18}$ ]]
+}
 
-if [[ "${1:-}" != "--no-cache" ]]; then
-  if [[ -r "$cache_file" ]]; then
-    now_ms="$(date +%s%3N)"
-    mtime_ms="$(stat -c %Y "$cache_file" 2>/dev/null || echo 0)000"
-    if (( now_ms - mtime_ms < 1200 )) && [[ -s "$cache_file" ]]; then
-      cat "$cache_file"
-      exit 0
-    fi
-  fi
-  exec 9>"$lock_file"
-  if flock -w 2 9; then
-    if [[ -r "$cache_file" ]]; then
-      now_ms="$(date +%s%3N)"
-      mtime_ms="$(stat -c %Y "$cache_file" 2>/dev/null || echo 0)000"
-      if (( now_ms - mtime_ms < 1200 )) && [[ -s "$cache_file" ]]; then
-        cat "$cache_file"
-        exit 0
+is_safe_regular_file() {
+  local f="$1" max_bytes="${2:-4096}" f_mode f_size
+  [[ -n "$f" && -f "$f" && ! -L "$f" && -O "$f" ]] || return 1
+  f_mode="$(stat -c '%a' "$f" 2>/dev/null || true)"
+  [[ "$f_mode" == "600" ]] || return 1
+  f_size="$(stat -c '%s' "$f" 2>/dev/null || true)"
+  is_uint "$f_size" && is_uint "$max_bytes" || return 1
+  (( 10#$f_size > 0 && 10#$f_size <= 10#$max_bytes ))
+}
+
+# Checked, user-owned 0700 runtime directory for state, cache, and locks
+runtime_base="${XDG_RUNTIME_DIR:-${HOME}/.local/state}"
+state_dir=""
+if [[ -n "$runtime_base" && ! -L "$runtime_base" ]]; then
+  (umask 077 && mkdir -p "$runtime_base") 2>/dev/null || true
+  if [[ -d "$runtime_base" && ! -L "$runtime_base" && -O "$runtime_base" ]]; then
+    candidate_dir="${runtime_base}/omarchy-power"
+    (umask 077 && mkdir -p "$candidate_dir") 2>/dev/null || true
+    if [[ -d "$candidate_dir" && ! -L "$candidate_dir" && -O "$candidate_dir" ]]; then
+      chmod 0700 "$candidate_dir" 2>/dev/null || true
+      if [[ "$(stat -c '%a' "$candidate_dir" 2>/dev/null)" == "700" ]]; then
+        state_dir="$candidate_dir"
       fi
     fi
-    "$0" --no-cache > "${cache_file}.tmp" && mv -f "${cache_file}.tmp" "$cache_file"
-    cat "$cache_file"
+  fi
+fi
+
+# Short 1.2s cache + flock so multiple monitor bar instances share a single sample
+cache_file="${state_dir:+$state_dir/telemetry.cache}"
+lock_file="${state_dir:+$state_dir/telemetry.lock}"
+
+read_fresh_cache() {
+  local now_ms mtime_s mtime_ms
+  [[ -n "$cache_file" ]] && is_safe_regular_file "$cache_file" 4096 || return 1
+  now_ms="$(date +%s%3N)"
+  mtime_s="$(stat -c '%Y' "$cache_file" 2>/dev/null || echo 0)"
+  is_uint "$now_ms" && is_uint "$mtime_s" || return 1
+  mtime_ms=$(( 10#$mtime_s * 1000 ))
+  if (( 10#$now_ms >= 10#$mtime_ms && 10#$now_ms - 10#$mtime_ms < 1200 )); then
+    head -c 4096 "$cache_file" 2>/dev/null
+    return 0
+  fi
+  return 1
+}
+
+if [[ "${1:-}" != "--no-cache" && -n "$state_dir" ]]; then
+  if read_fresh_cache; then
     exit 0
+  fi
+  if [[ ! -L "$lock_file" && ( ! -e "$lock_file" || ( -f "$lock_file" && -O "$lock_file" ) ) ]]; then
+    old_umask="$(umask)"
+    umask 077
+    exec 9>"$lock_file" 2>/dev/null || true
+    umask "$old_umask"
+    if [[ -f "$lock_file" && ! -L "$lock_file" && -O "$lock_file" ]]; then
+      chmod 0600 "$lock_file" 2>/dev/null || true
+      if flock -w 2 9; then
+        if read_fresh_cache; then
+          exit 0
+        fi
+        tmp_cache="$(umask 077 && mktemp "${state_dir}/.cache.XXXXXX" 2>/dev/null || true)"
+        if [[ -n "$tmp_cache" && -f "$tmp_cache" && ! -L "$tmp_cache" && -O "$tmp_cache" ]]; then
+          chmod 0600 "$tmp_cache" 2>/dev/null || true
+          if "$0" --no-cache > "$tmp_cache" && mv -f "$tmp_cache" "$cache_file"; then
+            if is_safe_regular_file "$cache_file" 4096; then
+              head -c 4096 "$cache_file" 2>/dev/null
+              exit 0
+            fi
+          fi
+          rm -f "$tmp_cache" 2>/dev/null || true
+        fi
+      fi
+    fi
   fi
 fi
 
@@ -84,34 +136,85 @@ done
 rapl_pkg_w=""
 rapl_psys_w=""
 if [[ -r /sys/class/powercap/intel-rapl:0/energy_uj ]]; then
-  now_ns="$(date +%s%N)"
-  pkg1="$(</sys/class/powercap/intel-rapl:0/energy_uj)"
-  psys1=0
-  [[ -r /sys/class/powercap/intel-rapl:1/energy_uj ]] && psys1="$(</sys/class/powercap/intel-rapl:1/energy_uj)"
-  max_uj="$(cat /sys/class/powercap/intel-rapl:0/max_energy_range_uj 2>/dev/null || echo 262143328850)"
-  state_file="/tmp/omarchy-rapl-${UID:-1000}.state"
-  prev_ns=0; prev_pkg=0; prev_psys=0
-  if [[ -r "$state_file" ]]; then
-    read -r prev_ns prev_pkg prev_psys < "$state_file" 2>/dev/null || true
+  now_us="$(date +%s%6N)"
+  pkg1="$(head -c 32 /sys/class/powercap/intel-rapl:0/energy_uj 2>/dev/null | tr -d '[:space:]' || true)"
+  psys1="0"
+  if [[ -r /sys/class/powercap/intel-rapl:1/energy_uj ]]; then
+    psys1="$(head -c 32 /sys/class/powercap/intel-rapl:1/energy_uj 2>/dev/null | tr -d '[:space:]' || true)"
+    is_uint "$psys1" || psys1="0"
   fi
-  dt_ns=$(( now_ns - prev_ns ))
-  if (( prev_ns <= 0 || dt_ns < 80000000 || dt_ns > 15000000000 )); then
-    prev_ns=$now_ns; prev_pkg=$pkg1; prev_psys=$psys1
-    sleep 0.15
-    now_ns="$(date +%s%N)"
-    pkg1="$(</sys/class/powercap/intel-rapl:0/energy_uj)"
-    [[ -r /sys/class/powercap/intel-rapl:1/energy_uj ]] && psys1="$(</sys/class/powercap/intel-rapl:1/energy_uj)"
-    dt_ns=$(( now_ns - prev_ns ))
+  max_uj="$(head -c 32 /sys/class/powercap/intel-rapl:0/max_energy_range_uj 2>/dev/null | tr -d '[:space:]' || true)"
+  is_uint "$max_uj" || max_uj="262143328850"
+
+  rapl_state="${state_dir:+$state_dir/rapl.state}"
+  prev_us="0"; prev_pkg="0"; prev_psys="0"
+  if [[ -n "$rapl_state" ]]; then
+    if is_safe_regular_file "$rapl_state" 64; then
+      raw_us=""; raw_pkg=""; raw_psys=""
+      IFS=' ' read -r raw_us raw_pkg raw_psys _ < <(head -c 64 "$rapl_state" 2>/dev/null) || true
+      if is_uint "$raw_us" && is_uint "$raw_pkg" && is_uint "${raw_psys:-0}"; then
+        prev_us="$raw_us"
+        prev_pkg="$raw_pkg"
+        prev_psys="${raw_psys:-0}"
+      else
+        rm -f "$rapl_state" 2>/dev/null || true
+      fi
+    elif [[ -e "$rapl_state" || -L "$rapl_state" ]]; then
+      rm -f "$rapl_state" 2>/dev/null || true
+    fi
   fi
-  printf '%s %s %s\n' "$now_ns" "$pkg1" "$psys1" > "$state_file" 2>/dev/null || true
-  if (( dt_ns > 0 )); then
-    dpkg=$(( pkg1 - prev_pkg ))
-    (( dpkg < 0 )) && dpkg=$(( dpkg + max_uj ))
-    rapl_pkg_w="$(awk -v e="$dpkg" -v dt="$dt_ns" 'BEGIN { printf "%.1f", (e * 1000.0) / dt }')"
-    if (( psys1 > 0 && prev_psys > 0 )); then
-      dpsys=$(( psys1 - prev_psys ))
-      (( dpsys < 0 )) && dpsys=$(( dpsys + max_uj ))
-      rapl_psys_w="$(awk -v e="$dpsys" -v dt="$dt_ns" 'BEGIN { printf "%.1f", (e * 1000.0) / dt }')"
+
+  if is_uint "$now_us" && is_uint "$pkg1" && is_uint "$psys1" && is_uint "$max_uj" && is_uint "$prev_us" && is_uint "$prev_pkg" && is_uint "$prev_psys"; then
+    dt_us="0"
+    if (( 10#$prev_us > 0 && 10#$now_us > 10#$prev_us )); then
+      dt_us=$(( 10#$now_us - 10#$prev_us ))
+    fi
+    if ! is_uint "$dt_us" || (( 10#$dt_us < 80000 || 10#$dt_us > 15000000 )); then
+      prev_us="$now_us"; prev_pkg="$pkg1"; prev_psys="$psys1"
+      sleep 0.15
+      now_us="$(date +%s%6N)"
+      pkg1="$(head -c 32 /sys/class/powercap/intel-rapl:0/energy_uj 2>/dev/null | tr -d '[:space:]' || true)"
+      if [[ -r /sys/class/powercap/intel-rapl:1/energy_uj ]]; then
+        psys1="$(head -c 32 /sys/class/powercap/intel-rapl:1/energy_uj 2>/dev/null | tr -d '[:space:]' || true)"
+        is_uint "$psys1" || psys1="0"
+      fi
+      dt_us="0"
+      if is_uint "$now_us" && is_uint "$prev_us" && is_uint "$pkg1" && (( 10#$now_us > 10#$prev_us )); then
+        dt_us=$(( 10#$now_us - 10#$prev_us ))
+      fi
+    fi
+
+    if [[ -n "$rapl_state" && -n "$state_dir" ]] && is_uint "$now_us" && is_uint "$pkg1" && is_uint "$psys1"; then
+      tmp_state="$(umask 077 && mktemp "${state_dir}/.rapl.XXXXXX" 2>/dev/null || true)"
+      if [[ -n "$tmp_state" && -f "$tmp_state" && ! -L "$tmp_state" && -O "$tmp_state" ]]; then
+        chmod 0600 "$tmp_state" 2>/dev/null || true
+        if printf '%s %s %s\n' "$now_us" "$pkg1" "$psys1" > "$tmp_state" 2>/dev/null; then
+          mv -f "$tmp_state" "$rapl_state" 2>/dev/null || rm -f "$tmp_state" 2>/dev/null || true
+        else
+          rm -f "$tmp_state" 2>/dev/null || true
+        fi
+      fi
+    fi
+
+    if is_uint "$dt_us" && (( 10#$dt_us > 0 )) && is_uint "$pkg1" && is_uint "$prev_pkg" && is_uint "$max_uj"; then
+      if (( 10#$pkg1 >= 10#$prev_pkg )); then
+        dpkg=$(( 10#$pkg1 - 10#$prev_pkg ))
+      else
+        dpkg=$(( 10#$pkg1 + 10#$max_uj - 10#$prev_pkg ))
+      fi
+      if is_uint "$dpkg"; then
+        rapl_pkg_w="$(awk -v e="$dpkg" -v dt="$dt_us" 'BEGIN { printf "%.1f", (e + 0.0) / dt }')"
+      fi
+      if is_uint "$psys1" && is_uint "$prev_psys" && (( 10#$psys1 > 0 && 10#$prev_psys > 0 )); then
+        if (( 10#$psys1 >= 10#$prev_psys )); then
+          dpsys=$(( 10#$psys1 - 10#$prev_psys ))
+        else
+          dpsys=$(( 10#$psys1 + 10#$max_uj - 10#$prev_psys ))
+        fi
+        if is_uint "$dpsys"; then
+          rapl_psys_w="$(awk -v e="$dpsys" -v dt="$dt_us" 'BEGIN { printf "%.1f", (e + 0.0) / dt }')"
+        fi
+      fi
     fi
   fi
 fi
