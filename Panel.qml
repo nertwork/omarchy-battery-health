@@ -28,7 +28,7 @@ Panel {
   //   "icon"       -> Battery icon only
   property string displayMode: "both"
   property bool configLoaded: false
-  readonly property string configPath: (Quickshell.env("HOME") || "/home/jfarr") + "/.local/state/omarchy/settings/nertwork.power.json"
+  readonly property string configPath: (Quickshell.env("HOME") || "") + "/.local/state/omarchy/settings/nertwork.power.json"
 
   readonly property bool showPercentage: root.displayMode === "both" || root.displayMode === "percentage"
   readonly property bool showWatts: root.displayMode === "both" || root.displayMode === "usage"
