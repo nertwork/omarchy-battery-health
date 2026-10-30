@@ -38,8 +38,13 @@ cache_file="${state_dir:+$state_dir/telemetry.cache}"
 lock_file="${state_dir:+$state_dir/telemetry.lock}"
 
 read_fresh_cache() {
-  local now_ms mtime_s mtime_ms
+  local now_ms mtime_s mtime_ms pf
   [[ -n "$cache_file" ]] && is_safe_regular_file "$cache_file" 4096 || return 1
+  for pf in "${HOME}/.local/state/omarchy/powerprofiles/last-profile" "${HOME}/.local/state/omarchy/powerprofiles/gpu-mode" "/var/lib/omarchy-power-profile/last-profile" "/var/lib/omarchy-power-profile/gpu-mode"; do
+    if [[ -e "$pf" && "$pf" -nt "$cache_file" ]]; then
+      return 1
+    fi
+  done
   now_ms="$(date +%s%3N)"
   mtime_s="$(stat -c '%Y' "$cache_file" 2>/dev/null || echo 0)"
   is_uint "$now_ms" && is_uint "$mtime_s" || return 1
@@ -222,25 +227,63 @@ fi
 # NVIDIA dGPU runtime PM & power draw (never wake from D3cold!)
 dgpu_label=""
 dgpu_num_w="0"
+nvidia_gpu=""
 if [[ -r /sys/bus/pci/devices/0000:01:00.0/power/runtime_status ]]; then
   dgpu_state="$(</sys/bus/pci/devices/0000:01:00.0/power/runtime_status)"
   if [[ "$dgpu_state" == "suspended" ]]; then
     dgpu_label="0.0W (D3cold)"
     dgpu_num_w="0"
+    nvidia_gpu="Sleeping (RTD3 D3cold · 0W)"
   elif [[ "$dgpu_state" == "active" ]] && command -v nvidia-smi >/dev/null 2>&1; then
-    nv_raw="$(timeout 1.5s nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits </dev/null 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
-    if [[ -n "$nv_raw" && "$nv_raw" != "[N/A]" ]]; then
-      dgpu_num_w="$nv_raw"
-      dgpu_label="$(awk -v w="$nv_raw" 'BEGIN { printf "%.1fW", w + 0 }')"
+    nv_line="$(timeout 1.5s nvidia-smi --query-gpu=power.draw,clocks.current.graphics,utilization.gpu,memory.used,temperature.gpu,pstate --format=csv,noheader,nounits </dev/null 2>/dev/null | head -n1 || true)"
+    if [[ -n "$nv_line" ]]; then
+      IFS="," read -r nv_w nv_clk nv_util nv_mem nv_temp nv_pstate <<< "$nv_line"
+      nv_w="${nv_w//[[:space:]]/}"
+      nv_clk="${nv_clk//[[:space:]]/}"
+      nv_util="${nv_util//[[:space:]]/}"
+      nv_mem="${nv_mem//[[:space:]]/}"
+      nv_temp="${nv_temp//[[:space:]]/}"
+      nv_pstate="${nv_pstate//[[:space:]]/}"
+      if [[ -n "$nv_w" && "$nv_w" != "[N/A]" ]]; then
+        dgpu_num_w="$nv_w"
+        if [[ "$nv_util" =~ ^[0-9]+$ ]] && (( 10#$nv_util > 0 )); then
+          dgpu_label="$(awk -v w="$nv_w" -v u="$nv_util" 'BEGIN { printf "%.1fW (%d%%)", w + 0, u + 0 }')"
+        elif [[ -n "$nv_pstate" && "$nv_pstate" != "[N/A]" ]]; then
+          dgpu_label="$(awk -v w="$nv_w" -v p="$nv_pstate" 'BEGIN { printf "%.1fW (%s)", w + 0, p }')"
+        else
+          dgpu_label="$(awk -v w="$nv_w" 'BEGIN { printf "%.1fW", w + 0 }')"
+        fi
+      else
+        dgpu_label="Active"
+      fi
+      if [[ -n "$nv_clk" && "$nv_clk" != "[N/A]" ]]; then
+        if [[ "$nv_util" =~ ^[0-9]+$ ]] && (( 10#$nv_util > 0 )); then
+          nvidia_gpu="${nv_clk}MHz · ${nv_mem:-0}MiB · ${nv_temp:-0}°C (${nv_util}%)"
+        else
+          nvidia_gpu="${nv_clk}MHz · ${nv_mem:-0}MiB · ${nv_temp:-0}°C (${nv_pstate:-P0})"
+        fi
+      else
+        nvidia_gpu="Active (${dgpu_label})"
+      fi
     else
       dgpu_label="Active"
+      nvidia_gpu="Active"
     fi
   fi
 fi
 
+gpu_mode=""
+for gm_file in "${HOME}/.local/state/omarchy/powerprofiles/gpu-mode" "/var/lib/omarchy-power-profile/gpu-mode"; do
+  if [[ -r "$gm_file" ]]; then
+    gpu_mode="$(head -n1 "$gm_file" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)"
+    [[ -n "$gpu_mode" ]] && break
+  fi
+done
+
 awk -v bat_dir="$bat_dir" -v ac_dir="$ac_dir" -v smc_dir="$smc_dir" -v tp_dir="$tp_dir" \
     -v rapl_pkg_w="$rapl_pkg_w" -v rapl_psys_w="$rapl_psys_w" \
     -v dgpu_label="$dgpu_label" -v dgpu_num_w="$dgpu_num_w" \
+    -v nvidia_gpu="$nvidia_gpu" -v gpu_mode="$gpu_mode" \
     -v ucsi_v_uv="$ucsi_v_uv" -v ucsi_i_ua="$ucsi_i_ua" -v ucsi_imax_ua="$ucsi_imax_ua" \
     -v orig_pct="${kv[percentage]:-}" \
     -v orig_state="${kv[state]:-}" \
@@ -525,5 +568,7 @@ BEGIN {
     print "charge_limit_end\t" bat_end_thresh
     print "charge_limit_path\t" bat_dir "/charge_control_end_threshold"
   }
+  if (nvidia_gpu != "") print "nvidia_gpu\t" nvidia_gpu
+  if (gpu_mode != "") print "gpu_mode\t" gpu_mode
 }
 '

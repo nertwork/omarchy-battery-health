@@ -472,6 +472,9 @@ Panel {
     id: batteryProc
     command: [root.telemetryScriptPath]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.updateKeyValue(text, "battery") }
+    onExited: {
+      batteryProc.command = [root.telemetryScriptPath]
+    }
   }
 
   Process {
@@ -497,6 +500,9 @@ Panel {
         return
       }
       if (!profilesProc.running) profilesProc.running = true
+      batteryProc.command = [root.telemetryScriptPath, "--no-cache"]
+      if (batteryProc.running) batteryProc.running = false
+      batteryProc.running = true
       root.refresh()
     }
   }
@@ -762,6 +768,8 @@ Panel {
             root.batteryInfo.ac_vi ||
             root.batteryInfo.rails ||
             root.batteryInfo.cpu_gpu ||
+            root.batteryInfo.nvidia_gpu ||
+            root.batteryInfo.gpu_mode ||
             root.batteryInfo.fans ||
             root.batteryInfo.time ||
             root.batteryInfo.health ||
@@ -806,6 +814,18 @@ Panel {
             visible: !!root.batteryInfo.cpu_gpu
             label: "CPU / dGPU"
             value: root.batteryInfo.cpu_gpu || ""
+          }
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.nvidia_gpu
+            label: "NVIDIA dGPU"
+            value: root.batteryInfo.nvidia_gpu || ""
+          }
+          InfoPair {
+            width: metricsGrid.colWidth
+            visible: !!root.batteryInfo.gpu_mode
+            label: "GPU Policy"
+            value: root.batteryInfo.gpu_mode || ""
           }
           InfoPair {
             width: metricsGrid.colWidth
