@@ -366,6 +366,11 @@ Panel {
           root.hasChargeLimit = true
         }
       }
+      if (next.active_profile && !actionProc.running && !root.pendingProfile) {
+        root.activeProfile = next.active_profile
+        var pidx = root.profiles.indexOf(next.active_profile)
+        if (pidx >= 0 && !root.cursorActive) root.profileIndex = pidx
+      }
     } else {
       systemInfo = next
     }
@@ -546,7 +551,6 @@ Panel {
     repeat: true
     onTriggered: {
       if (!batteryProc.running) batteryProc.running = true
-      if (!profilesProc.running) profilesProc.running = true
     }
   }
 

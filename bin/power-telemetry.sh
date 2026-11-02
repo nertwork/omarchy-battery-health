@@ -38,7 +38,7 @@ cache_file="${state_dir:+$state_dir/telemetry.cache}"
 lock_file="${state_dir:+$state_dir/telemetry.lock}"
 
 read_fresh_cache() {
-  local now_ms mtime_s mtime_ms pf
+  local now_ms mtime_ms pf
   [[ -n "$cache_file" ]] && is_safe_regular_file "$cache_file" 4096 || return 1
   for pf in "${HOME}/.local/state/omarchy/powerprofiles/last-profile" "${HOME}/.local/state/omarchy/powerprofiles/gpu-mode" "/var/lib/omarchy-power-profile/last-profile" "/var/lib/omarchy-power-profile/gpu-mode"; do
     if [[ -e "$pf" && "$pf" -nt "$cache_file" ]]; then
@@ -46,10 +46,9 @@ read_fresh_cache() {
     fi
   done
   now_ms="$(date +%s%3N)"
-  mtime_s="$(stat -c '%Y' "$cache_file" 2>/dev/null || echo 0)"
-  is_uint "$now_ms" && is_uint "$mtime_s" || return 1
-  mtime_ms=$(( 10#$mtime_s * 1000 ))
-  if (( 10#$now_ms >= 10#$mtime_ms && 10#$now_ms - 10#$mtime_ms < 1200 )); then
+  mtime_ms="$(stat -c '%.3Y' "$cache_file" 2>/dev/null | tr -d '.' || echo 0)"
+  is_uint "$now_ms" && is_uint "$mtime_ms" || return 1
+  if (( 10#$now_ms >= 10#$mtime_ms && 10#$now_ms - 10#$mtime_ms < 1800 )); then
     head -c 4096 "$cache_file" 2>/dev/null
     return 0
   fi
@@ -89,13 +88,7 @@ fi
 
 declare -A kv
 
-if command -v omarchy-battery-status >/dev/null 2>&1; then
-  while IFS=$'\t' read -r k v; do
-    [[ -n "$k" ]] && kv["$k"]="$v"
-  done < <(omarchy-battery-status --shell 2>/dev/null || true)
-fi
-
-# Locate battery sysfs
+# Locate battery sysfs first; only fall back to omarchy-battery-status (upower) if sysfs is absent
 bat_dir=""
 for d in /sys/class/power_supply/macsmc-battery /sys/class/power_supply/BAT0 /sys/class/power_supply/BAT*; do
   if [[ -d "$d" ]]; then
@@ -103,6 +96,12 @@ for d in /sys/class/power_supply/macsmc-battery /sys/class/power_supply/BAT0 /sy
     break
   fi
 done
+
+if [[ -z "$bat_dir" ]] && command -v omarchy-battery-status >/dev/null 2>&1; then
+  while IFS=$'\t' read -r k v; do
+    [[ -n "$k" ]] && kv["$k"]="$v"
+  done < <(omarchy-battery-status --shell 2>/dev/null || true)
+fi
 
 # Locate AC sysfs
 ac_dir=""
@@ -228,12 +227,20 @@ fi
 dgpu_label=""
 dgpu_num_w="0"
 nvidia_gpu=""
+gpu_procs=""
 if [[ -r /sys/bus/pci/devices/0000:01:00.0/power/runtime_status ]]; then
   dgpu_state="$(</sys/bus/pci/devices/0000:01:00.0/power/runtime_status)"
+  dgpu_ctrl="$(cat /sys/bus/pci/devices/0000:01:00.0/power/control 2>/dev/null || echo on)"
   if [[ "$dgpu_state" == "suspended" ]]; then
     dgpu_label="0.0W (D3cold)"
     dgpu_num_w="0"
     nvidia_gpu="Sleeping (RTD3 D3cold · 0W)"
+  elif [[ "$dgpu_ctrl" == "auto" ]]; then
+    # Do not open /dev/nvidia0 via nvidia-smi while in Hybrid RTD3 auto mode,
+    # as polling nvidia-smi resets the PCI runtime PM autosuspend timer.
+    dgpu_label="Idle -> RTD3"
+    dgpu_num_w="0"
+    nvidia_gpu="Active (Idle -> RTD3)"
   elif [[ "$dgpu_state" == "active" ]] && command -v nvidia-smi >/dev/null 2>&1; then
     nv_line="$(timeout 1.5s nvidia-smi --query-gpu=power.draw,clocks.current.graphics,utilization.gpu,memory.used,temperature.gpu,pstate --format=csv,noheader,nounits </dev/null 2>/dev/null | head -n1 || true)"
     if [[ -n "$nv_line" ]]; then
@@ -256,14 +263,20 @@ if [[ -r /sys/bus/pci/devices/0000:01:00.0/power/runtime_status ]]; then
       else
         dgpu_label="Active"
       fi
+      if [[ "${nv_util:-0}" =~ ^[0-9]+$ && "${nv_mem:-0}" =~ ^[0-9]+$ ]] && (( 10#${nv_util:-0} > 0 || 10#${nv_mem:-0} > 32 )); then
+        gpu_procs="$(timeout 1.5s nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader,nounits </dev/null 2>/dev/null | awk -F',' 'NF>=3 { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3); n=split($2, a, "/"); name=a[n]; if ($2 ~ /ollama/ && name != "ollama") name="ollama(" name ")"; printf "%s%s %sMiB", ( NR>1 ? ", " : "" ), name, $3 }' || true)"
+      fi
       if [[ -n "$nv_clk" && "$nv_clk" != "[N/A]" ]]; then
         if [[ "$nv_util" =~ ^[0-9]+$ ]] && (( 10#$nv_util > 0 )); then
           nvidia_gpu="${nv_clk}MHz · ${nv_mem:-0}MiB · ${nv_temp:-0}°C (${nv_util}%)"
         else
           nvidia_gpu="${nv_clk}MHz · ${nv_mem:-0}MiB · ${nv_temp:-0}°C (${nv_pstate:-P0})"
         fi
+        if [[ -n "$gpu_procs" ]]; then
+          nvidia_gpu="${nvidia_gpu} · ${gpu_procs}"
+        fi
       else
-        nvidia_gpu="Active (${dgpu_label})"
+        nvidia_gpu="Active (${dgpu_label}${gpu_procs:+ · $gpu_procs})"
       fi
     else
       dgpu_label="Active"
@@ -280,10 +293,19 @@ for gm_file in "${HOME}/.local/state/omarchy/powerprofiles/gpu-mode" "/var/lib/o
   fi
 done
 
+active_profile=""
+for ap_file in "/var/lib/omarchy-power-profile/last-profile" "${HOME}/.local/state/omarchy/powerprofiles/last-profile"; do
+  if [[ -r "$ap_file" ]]; then
+    active_profile="$(head -n1 "$ap_file" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ -n "$active_profile" ]] && break
+  fi
+done
+
 awk -v bat_dir="$bat_dir" -v ac_dir="$ac_dir" -v smc_dir="$smc_dir" -v tp_dir="$tp_dir" \
     -v rapl_pkg_w="$rapl_pkg_w" -v rapl_psys_w="$rapl_psys_w" \
     -v dgpu_label="$dgpu_label" -v dgpu_num_w="$dgpu_num_w" \
-    -v nvidia_gpu="$nvidia_gpu" -v gpu_mode="$gpu_mode" \
+    -v nvidia_gpu="$nvidia_gpu" -v gpu_procs="$gpu_procs" -v gpu_mode="$gpu_mode" \
+    -v active_profile="$active_profile" \
     -v ucsi_v_uv="$ucsi_v_uv" -v ucsi_i_ua="$ucsi_i_ua" -v ucsi_imax_ua="$ucsi_imax_ua" \
     -v orig_pct="${kv[percentage]:-}" \
     -v orig_state="${kv[state]:-}" \
@@ -370,6 +392,11 @@ BEGIN {
   }
   if (rate == "" && bat_w > 0) {
     rate = sprintf("%.1fW", bat_w)
+  }
+  if (ac_online == "1" && bat_end_thresh != "" && bat_end_thresh + 0 < 99 && bat_cap != "" && bat_cap + 0 >= bat_end_thresh + 0 && bat_w <= 0.2) {
+    if (state == "not charging" || state == "not-charging" || state == "charging" || state == "full" || state == "fully-charged") {
+      state = "holding"
+    }
   }
 
   # System power (watts used by laptop)
@@ -520,7 +547,7 @@ BEGIN {
     temp_volt = sprintf("%.2fV", (bat_volt + 0) / 1000000.0)
   }
 
-  # Time estimate fallback when discharging if empty
+  # Time estimate fallback when discharging or charging if empty
   time_str = orig_time
   if (time_str == "" && state == "discharging" && bat_energy_now != "" && sys_w > 0.5) {
     en_wh = (bat_energy_now + 0) / 1000000.0
@@ -530,6 +557,19 @@ BEGIN {
     if (m == 60) { h++; m = 0 }
     if (h > 0) time_str = sprintf("%dh %dm", h, m)
     else time_str = sprintf("%dm", m)
+  } else if (time_str == "" && state == "charging" && bat_energy_now != "" && bat_energy_full != "" && bat_w > 0.2) {
+    en_wh = (bat_energy_now + 0) / 1000000.0
+    ef_wh = (bat_energy_full + 0) / 1000000.0
+    lim_pct = (bat_end_thresh != "" && bat_end_thresh + 0 > 0) ? (bat_end_thresh + 0) : 100.0
+    target_wh = ef_wh * (lim_pct / 100.0)
+    if (target_wh > en_wh) {
+      hrs = (target_wh - en_wh) / bat_w
+      h = int(hrs)
+      m = int((hrs - h) * 60 + 0.5)
+      if (m == 60) { h++; m = 0 }
+      if (h > 0) time_str = sprintf("%dh %dm", h, m)
+      else if (m > 0) time_str = sprintf("%dm", m)
+    }
   }
 
   # Threshold (prefer instantaneous sysfs over cached upower)
@@ -570,5 +610,6 @@ BEGIN {
   }
   if (nvidia_gpu != "") print "nvidia_gpu\t" nvidia_gpu
   if (gpu_mode != "") print "gpu_mode\t" gpu_mode
+  if (active_profile != "") print "active_profile\t" active_profile
 }
 '
