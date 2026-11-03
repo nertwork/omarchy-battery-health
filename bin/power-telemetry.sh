@@ -264,7 +264,19 @@ if [[ -r /sys/bus/pci/devices/0000:01:00.0/power/runtime_status ]]; then
         dgpu_label="Active"
       fi
       if [[ "${nv_util:-0}" =~ ^[0-9]+$ && "${nv_mem:-0}" =~ ^[0-9]+$ ]] && (( 10#${nv_util:-0} > 0 || 10#${nv_mem:-0} > 32 )); then
-        gpu_procs="$(timeout 1.5s nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader,nounits </dev/null 2>/dev/null | awk -F',' 'NF>=3 { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3); n=split($2, a, "/"); name=a[n]; if ($2 ~ /ollama/ && name != "ollama") name="ollama(" name ")"; printf "%s%s %sMiB", ( NR>1 ? ", " : "" ), name, $3 }' || true)"
+        gpu_procs="$(timeout 1.5s nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader,nounits </dev/null 2>/dev/null | awk -F',' 'NF>=3 {
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1);
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2);
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3);
+          n=split($2, a, "/");
+          name=a[n];
+          if ($2 ~ /ollama/ && name != "ollama") name="ollama(" name ")";
+          gsub(/[^a-zA-Z0-9_().-]/, "", name);
+          name=substr(name, 1, 32);
+          if (name == "") name="app";
+          gsub(/[^0-9]/, "", $3);
+          printf "%s%s %sMiB", ( NR>1 ? ", " : "" ), name, $3
+        }' || true)"
       fi
       if [[ -n "$nv_clk" && "$nv_clk" != "[N/A]" ]]; then
         if [[ "$nv_util" =~ ^[0-9]+$ ]] && (( 10#$nv_util > 0 )); then
@@ -300,6 +312,28 @@ for ap_file in "/var/lib/omarchy-power-profile/last-profile" "${HOME}/.local/sta
     [[ -n "$active_profile" ]] && break
   fi
 done
+
+# Strip potential backslash escape sequences and HTML/markup from strings passed to awk -v
+nvidia_gpu="${nvidia_gpu//\\/}"
+nvidia_gpu="${nvidia_gpu//\"/}"
+nvidia_gpu="${nvidia_gpu//\'/}"
+nvidia_gpu="${nvidia_gpu//</}"
+nvidia_gpu="${nvidia_gpu//>/}"
+gpu_procs="${gpu_procs//\\/}"
+gpu_procs="${gpu_procs//\"/}"
+gpu_procs="${gpu_procs//\'/}"
+gpu_procs="${gpu_procs//</}"
+gpu_procs="${gpu_procs//>/}"
+gpu_mode="${gpu_mode//\\/}"
+gpu_mode="${gpu_mode//\"/}"
+gpu_mode="${gpu_mode//\'/}"
+gpu_mode="${gpu_mode//</}"
+gpu_mode="${gpu_mode//>/}"
+active_profile="${active_profile//\\/}"
+active_profile="${active_profile//\"/}"
+active_profile="${active_profile//\'/}"
+active_profile="${active_profile//</}"
+active_profile="${active_profile//>/}"
 
 awk -v bat_dir="$bat_dir" -v ac_dir="$ac_dir" -v smc_dir="$smc_dir" -v tp_dir="$tp_dir" \
     -v rapl_pkg_w="$rapl_pkg_w" -v rapl_psys_w="$rapl_psys_w" \
