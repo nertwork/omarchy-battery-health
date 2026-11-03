@@ -103,25 +103,96 @@ if [[ -z "$bat_dir" ]] && command -v omarchy-battery-status >/dev/null 2>&1; the
   done < <(omarchy-battery-status --shell 2>/dev/null || true)
 fi
 
-# Locate AC sysfs
+# Locate AC sysfs and verify online state
 ac_dir=""
-for d in /sys/class/power_supply/macsmc-ac /sys/class/power_supply/AC* /sys/class/power_supply/ADP* /sys/class/power_supply/ucsi-source-psy-*; do
+ac_is_online=0
+for d in /sys/class/power_supply/macsmc-ac /sys/class/power_supply/AC* /sys/class/power_supply/ADP*; do
   if [[ -d "$d" ]]; then
-    ac_dir="$d"
-    break
+    [[ -z "$ac_dir" ]] && ac_dir="$d"
+    if [[ -r "$d/online" && "$(<"$d/online")" == "1" ]]; then
+      ac_is_online=1
+      ac_dir="$d"
+      break
+    fi
   fi
 done
 
-# Locate USB-C PD active source (if present on ThinkPad / x86_64)
-ucsi_v_uv=""
-ucsi_i_ua=""
-ucsi_imax_ua=""
+# Locate USB-C PD / AC charger telemetry (supports multi-port UCSI & Type-C PD EPR / ThinkPad 140W)
+ucsi_best_v_uv=""
+ucsi_best_i_ua=""
+ucsi_best_limit_uw=""
+best_w_uw=0
+
 for d in /sys/class/power_supply/ucsi-source-psy-*; do
+  [[ -d "$d" ]] || continue
   if [[ -r "$d/online" && "$(<"$d/online")" == "1" ]]; then
-    [[ -r "$d/voltage_now" ]] && ucsi_v_uv="$(<"$d/voltage_now")"
-    [[ -r "$d/current_now" ]] && ucsi_i_ua="$(<"$d/current_now")"
-    [[ -r "$d/current_max" ]] && ucsi_imax_ua="$(<"$d/current_max")"
-    break
+    ac_is_online=1
+    [[ -z "$ac_dir" ]] && ac_dir="$d"
+    v_now=""; v_max=""; i_now=""; i_max=""
+    [[ -r "$d/voltage_now" ]] && v_now="$(<"$d/voltage_now")"
+    [[ -r "$d/voltage_max" ]] && v_max="$(<"$d/voltage_max")"
+    [[ -r "$d/current_now" ]] && i_now="$(<"$d/current_now")"
+    [[ -r "$d/current_max" ]] && i_max="$(<"$d/current_max")"
+    is_uint "$v_now" || v_now=0
+    is_uint "$v_max" || v_max=0
+    is_uint "$i_now" || i_now=0
+    is_uint "$i_max" || i_max=0
+
+    # Effective voltage: if voltage_now is baseline 5V (<=5V) but voltage_max is negotiated higher (>=9V), use voltage_max
+    v_eff="$v_now"
+    if (( 10#$v_max > 5000000 && 10#$v_now <= 5000000 )); then
+      v_eff="$v_max"
+    elif (( 10#$v_eff == 0 )); then
+      v_eff="$v_max"
+    fi
+    i_eff="$i_max"
+    (( 10#$i_eff == 0 )) && i_eff="$i_now"
+
+    if (( 10#$v_eff > 0 && 10#$i_eff > 0 )); then
+      cand_uw=$(( (10#$v_eff / 1000) * (10#$i_eff / 1000) ))
+      if (( cand_uw > best_w_uw )); then
+        best_w_uw=$cand_uw
+        ucsi_best_v_uv="$v_eff"
+        ucsi_best_i_ua="$i_eff"
+        ucsi_best_limit_uw="$cand_uw"
+      fi
+    fi
+  fi
+done
+
+# Inspect Type-C PD partner and port source capabilities
+for pdo in /sys/class/typec/port*/usb_power_delivery/*-capabilities/*:* /sys/class/typec/port*-partner/usb_power_delivery/*-capabilities/*:*; do
+  [[ -d "$pdo" ]] || continue
+  v_mv=0; i_ma=0
+  if [[ -r "$pdo/voltage" ]]; then
+    raw_v="$(<"$pdo/voltage")"
+    raw_v="${raw_v//[^0-9]/}"
+    is_uint "$raw_v" && v_mv="$raw_v"
+  fi
+  if [[ -r "$pdo/maximum_current" ]]; then
+    raw_i="$(<"$pdo/maximum_current")"
+    raw_i="${raw_i//[^0-9]/}"
+    is_uint "$raw_i" && i_ma="$raw_i"
+  elif [[ -r "$pdo/operational_current" ]]; then
+    raw_i="$(<"$pdo/operational_current")"
+    raw_i="${raw_i//[^0-9]/}"
+    is_uint "$raw_i" && i_ma="$raw_i"
+  fi
+
+  # If voltage is 0mV (e.g. proprietary / variable PDO) but current is high (e.g. 7210mA on ThinkPad P1 140W ports),
+  # operating voltage is standard 20000mV (20V)
+  if (( 10#$v_mv == 0 && 10#$i_ma >= 3000 )); then
+    v_mv=20000
+  fi
+
+  if (( 10#$v_mv >= 5000 && 10#$i_ma > 0 )); then
+    cand_uw=$(( 10#$v_mv * 10#$i_ma ))
+    if (( cand_uw > best_w_uw )); then
+      best_w_uw=$cand_uw
+      ucsi_best_v_uv=$(( 10#$v_mv * 1000 ))
+      ucsi_best_i_ua=$(( 10#$i_ma * 1000 ))
+      ucsi_best_limit_uw="$cand_uw"
+    fi
   fi
 done
 
@@ -340,7 +411,8 @@ awk -v bat_dir="$bat_dir" -v ac_dir="$ac_dir" -v smc_dir="$smc_dir" -v tp_dir="$
     -v dgpu_label="$dgpu_label" -v dgpu_num_w="$dgpu_num_w" \
     -v nvidia_gpu="$nvidia_gpu" -v gpu_procs="$gpu_procs" -v gpu_mode="$gpu_mode" \
     -v active_profile="$active_profile" \
-    -v ucsi_v_uv="$ucsi_v_uv" -v ucsi_i_ua="$ucsi_i_ua" -v ucsi_imax_ua="$ucsi_imax_ua" \
+    -v ucsi_v_uv="$ucsi_best_v_uv" -v ucsi_i_ua="$ucsi_best_i_ua" -v ucsi_limit_uw="$ucsi_best_limit_uw" \
+    -v ac_online_fallback="$ac_is_online" \
     -v orig_pct="${kv[percentage]:-}" \
     -v orig_state="${kv[state]:-}" \
     -v orig_rate="${kv[rate]:-}" \
@@ -385,16 +457,32 @@ BEGIN {
     in_mv = (ucsi_v_uv + 0) / 1000.0
     if (ucsi_i_ua != "" && ucsi_i_ua + 0 > 0) {
       in_ma = (ucsi_i_ua + 0) / 1000.0
-    } else if (ucsi_imax_ua != "" && ucsi_imax_ua + 0 > 0) {
-      in_ma = (ucsi_imax_ua + 0) / 1000.0
     }
   }
 
   # AC telemetry
   ac_online   = read_file(ac_dir "/online")
+  if (ac_online == "" && ac_online_fallback != "") {
+    ac_online = ac_online_fallback
+  }
   ac_limit_uw = read_file(ac_dir "/input_power_limit")
-  if (ac_limit_uw == "" && ucsi_v_uv != "" && ucsi_imax_ua != "" && ucsi_v_uv + 0 > 0 && ucsi_imax_ua + 0 > 0) {
-    ac_limit_uw = ((ucsi_v_uv + 0) / 1000000.0) * ((ucsi_imax_ua + 0) / 1000000.0) * 1000000.0
+  if (ac_limit_uw == "") {
+    if (ucsi_limit_uw != "" && ucsi_limit_uw + 0 > 0) {
+      ac_limit_uw = ucsi_limit_uw + 0
+    } else if (ucsi_v_uv != "" && ucsi_i_ua != "" && ucsi_v_uv + 0 > 0 && ucsi_i_ua + 0 > 0) {
+      ac_limit_uw = ((ucsi_v_uv + 0) / 1000000.0) * ((ucsi_i_ua + 0) / 1000000.0) * 1000000.0
+    }
+  }
+
+  # Normalize adapter limit and V/I for standard power adapters (e.g. 140W on ThinkPad P1 Gen 7 where 7.21A * 20V = 144.2W is nominal 140W)
+  if (ac_limit_uw != "" && ac_limit_uw + 0 > 0) {
+    lim_w = (ac_limit_uw + 0) / 1000000.0
+    if (lim_w >= 138 && lim_w <= 145) {
+      ac_limit_uw = 140000000
+      if (in_mv != "" && in_mv + 0 >= 19000 && in_mv + 0 <= 21000) {
+        in_ma = 7000
+      }
+    }
   }
 
   # Battery telemetry
@@ -475,14 +563,24 @@ BEGIN {
       } else {
         ac_power = sprintf("%.1fW", ac_w)
       }
-    } else if (ac_limit_uw != "" && ac_limit_uw + 0 > 0) {
-      ac_power = sprintf("Online (%.0fW max)", (ac_limit_uw + 0) / 1000000.0)
-    } else if (state == "charging" && bat_w > 0 && sys_w > 0) {
-      ac_power = sprintf("Online (~%.1fW)", sys_w + bat_w)
-    } else if (sys_w > 0) {
-      ac_power = sprintf("Online (~%.1fW)", sys_w)
     } else {
-      ac_power = "Connected"
+      # On platforms without direct AC sensor (x86_64 / ThinkPad), compute estimated draw
+      est_ac_w = sys_w
+      if (state == "charging" && bat_w > 0) {
+        est_ac_w = est_ac_w + bat_w
+      }
+      if (ac_limit_uw != "" && ac_limit_uw + 0 > 0) {
+        ac_lim_w = (ac_limit_uw + 0) / 1000000.0
+        if (est_ac_w > 0) {
+          ac_power = sprintf("~%.1fW / %.0fW max", est_ac_w, ac_lim_w)
+        } else {
+          ac_power = sprintf("Online (%.0fW max)", ac_lim_w)
+        }
+      } else if (est_ac_w > 0) {
+        ac_power = sprintf("Online (~%.1fW)", est_ac_w)
+      } else {
+        ac_power = "Connected"
+      }
     }
   } else {
     ac_power = "Offline"
