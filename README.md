@@ -1,5 +1,7 @@
 # Battery Health & Power for Omarchy
 
+[![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/nertwork/omarchy-battery-health?utm_source=oss&utm_medium=github&utm_campaign=nertwork%2Fomarchy-battery-health&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)](https://coderabbit.ai)
+
 A polished, native Omarchy status bar panel and widget providing advanced battery health management, 80% charge threshold limiting, power profile switching, configurable bar display modes (`both`, `percentage`, `usage`), and live Apple Silicon SMC & ThinkPad RAPL + Hybrid NVIDIA RTX / Intel Arc GPU & UI policy telemetry.
 
 <p align="center">
